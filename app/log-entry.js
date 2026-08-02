@@ -1,10 +1,15 @@
 /**
  * app/log-entry.js
  *
- * Route: "/log-entry". Router equivalent of the old LogEntryScreen.js.
- * Only the navigation call changed (router.back() instead of
- * navigation.goBack()) — all form logic, validation, and save behavior are
- * identical to the React Navigation version.
+ * Route: "/log-entry". Daily log creation form.
+ *
+ * Phase 2 adds photo capture/gallery-picking, a thumbnail grid, and a
+ * full-screen photo viewer. Because photos need a log_id to attach to,
+ * adding the *first* photo before the user has pressed "Save" triggers an
+ * auto-save: a minimally-validated log row is inserted immediately, and
+ * `currentLogId` is remembered for the rest of the session. The final
+ * "Save Daily Log" button then does an UPDATE against that same row
+ * instead of inserting a second one.
  */
 
 import React, { useState, useCallback } from 'react';
@@ -19,9 +24,13 @@ import {
   KeyboardAvoidingView,
   Platform,
   Switch,
+  Image,
+  Modal,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
+import * as ImagePicker from 'expo-image-picker';
 import databaseManager from '../db/DatabaseManager';
 import {
   generateUUID,
@@ -31,6 +40,12 @@ import {
 
 const WEATHER_CONDITIONS = ['Sunny', 'Cloudy', 'Rain', 'Storm', 'Snow', 'Windy'];
 const DEFAULT_PROJECT_ID = 'default-project';
+
+const PHOTO_SYNC_STYLES = {
+  pending: { backgroundColor: '#FEF3C7', color: '#92400E', label: 'Pending' },
+  synced: { backgroundColor: '#D1FAE5', color: '#065F46', label: 'Synced' },
+  failed: { backgroundColor: '#FEE2E2', color: '#991B1B', label: 'Failed' },
+};
 
 export default function LogEntryScreen() {
   const todayISO = getTodayISODate();
@@ -43,6 +58,13 @@ export default function LogEntryScreen() {
   const [issues, setIssues] = useState([]);
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
+
+  // --- Phase 2: photo state ---
+  const [currentLogId, setCurrentLogId] = useState(null);
+  const [photos, setPhotos] = useState([]);
+  const [photoLoading, setPhotoLoading] = useState(false);
+  const [modalPhoto, setModalPhoto] = useState(null);
+  const [modalVisible, setModalVisible] = useState(false);
 
   // ---------- Workers ----------
   const addWorkerRow = useCallback(() => {
@@ -89,7 +111,11 @@ export default function LogEntryScreen() {
     setIssues((prev) => prev.filter((_, i) => i !== index));
   }, []);
 
-  // ---------- Validation & Save ----------
+  // ---------- Shared validation ----------
+
+  /**
+   * Full validation, run before the final "Save Daily Log" button commits.
+   */
   const validate = () => {
     if (!supervisorName.trim()) {
       Alert.alert('Missing information', 'Supervisor name is required.');
@@ -137,45 +163,215 @@ export default function LogEntryScreen() {
     return true;
   };
 
+  /**
+   * Lighter validation used only to gate the photo auto-save: a photo has
+   * to belong to *some* log, so we require just enough to make that log
+   * meaningful (supervisor + at least one worker), without forcing the
+   * user to fill in materials/issues/notes before they can snap a photo.
+   */
+  const validateForAutoSave = () => {
+    if (!supervisorName.trim()) {
+      Alert.alert(
+        'Add supervisor name first',
+        'Enter the supervisor name before attaching photos, so this log can be saved.'
+      );
+      return false;
+    }
+    const validWorkers = workers.filter(
+      (w) => w.trade.trim() && String(w.count).trim()
+    );
+    if (validWorkers.length === 0) {
+      Alert.alert(
+        'Add a worker first',
+        'Enter at least one worker (trade + count) before attaching photos, so this log can be saved.'
+      );
+      return false;
+    }
+    return true;
+  };
+
+  const buildLogPayload = () => {
+    const cleanedWorkers = workers
+      .filter((w) => w.trade.trim() && String(w.count).trim())
+      .map((w) => ({ trade: w.trade.trim(), count: Number(w.count) }));
+
+    const cleanedMaterials = materials
+      .filter((m) => m.name.trim() && String(m.quantity).trim())
+      .map((m) => ({
+        name: m.name.trim(),
+        quantity: Number(m.quantity),
+        unit: m.unit.trim(),
+      }));
+
+    const cleanedIssues = issues
+      .filter((iss) => iss.description.trim())
+      .map((iss) => ({
+        description: iss.description.trim(),
+        flagged: !!iss.flagged,
+      }));
+
+    return {
+      project_id: DEFAULT_PROJECT_ID,
+      log_date: todayISO,
+      weather: {
+        condition: weatherCondition,
+        temp: weatherTemp ? Number(weatherTemp) : null,
+      },
+      workers: cleanedWorkers,
+      materials: cleanedMaterials,
+      issues: cleanedIssues,
+      notes: notes.trim(),
+      supervisor_name: supervisorName.trim(),
+    };
+  };
+
+  /**
+   * Returns the id of a persisted log for this form, auto-saving one first
+   * if it hasn't been saved yet. Returns null if auto-save validation
+   * fails (an alert has already been shown in that case).
+   */
+  const ensureLogSaved = async () => {
+    if (currentLogId) return currentLogId;
+
+    if (!validateForAutoSave()) return null;
+
+    const inserted = await databaseManager.insertLog({
+      id: generateUUID(),
+      ...buildLogPayload(),
+      sync_status: 'pending',
+    });
+    setCurrentLogId(inserted.id);
+    return inserted.id;
+  };
+
+  // ---------- Photos ----------
+
+  const requestCameraPermission = async () => {
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert(
+        'Camera permission needed',
+        'SiteLog needs camera access to take site photos. You can enable this in your device Settings.'
+      );
+      return false;
+    }
+    return true;
+  };
+
+  const requestGalleryPermission = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert(
+        'Photo library permission needed',
+        'SiteLog needs photo library access to attach existing photos. You can enable this in your device Settings.'
+      );
+      return false;
+    }
+    return true;
+  };
+
+  const savePhotoToLog = async (uri) => {
+    setPhotoLoading(true);
+    try {
+      const logId = await ensureLogSaved();
+      if (!logId) return; // validation alert already shown
+
+      const photo = await databaseManager.savePhoto(uri, logId);
+      setPhotos((prev) => [...prev, photo]);
+    } catch (err) {
+      console.error('Failed to save photo:', err);
+      Alert.alert('Photo save failed', 'Something went wrong while saving this photo. Please try again.');
+    } finally {
+      setPhotoLoading(false);
+    }
+  };
+
+  const takePhoto = async () => {
+    const granted = await requestCameraPermission();
+    if (!granted) return;
+
+    try {
+      const result = await ImagePicker.launchCameraAsync({
+        quality: 1,
+        allowsEditing: false,
+      });
+      if (result.canceled || !result.assets?.length) return;
+      await savePhotoToLog(result.assets[0].uri);
+    } catch (err) {
+      console.error('Camera error:', err);
+      Alert.alert('Camera error', 'Could not open the camera. Please try again.');
+    }
+  };
+
+  const pickPhoto = async () => {
+    const granted = await requestGalleryPermission();
+    if (!granted) return;
+
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 1,
+      });
+      if (result.canceled || !result.assets?.length) return;
+      await savePhotoToLog(result.assets[0].uri);
+    } catch (err) {
+      console.error('Gallery error:', err);
+      Alert.alert('Gallery error', 'Could not open the photo library. Please try again.');
+    }
+  };
+
+  const removePhoto = (photoId, filePath) => {
+    Alert.alert(
+      'Delete photo?',
+      'This photo will be permanently removed from this log.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await databaseManager.deletePhoto(photoId, filePath);
+              setPhotos((prev) => prev.filter((p) => p.id !== photoId));
+            } catch (err) {
+              console.error('Failed to delete photo:', err);
+              Alert.alert('Delete failed', 'Could not delete this photo. Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const viewPhoto = (photo) => {
+    setModalPhoto(photo);
+    setModalVisible(true);
+  };
+
+  const closeModal = () => {
+    setModalVisible(false);
+    setModalPhoto(null);
+  };
+
+  // ---------- Save ----------
   const handleSave = async () => {
     if (!validate()) return;
 
     setSaving(true);
     try {
-      const cleanedWorkers = workers
-        .filter((w) => w.trade.trim() && String(w.count).trim())
-        .map((w) => ({ trade: w.trade.trim(), count: Number(w.count) }));
+      const payload = buildLogPayload();
 
-      const cleanedMaterials = materials
-        .filter((m) => m.name.trim() && String(m.quantity).trim())
-        .map((m) => ({
-          name: m.name.trim(),
-          quantity: Number(m.quantity),
-          unit: m.unit.trim(),
-        }));
-
-      const cleanedIssues = issues
-        .filter((iss) => iss.description.trim())
-        .map((iss) => ({
-          description: iss.description.trim(),
-          flagged: !!iss.flagged,
-        }));
-
-      await databaseManager.insertLog({
-        id: generateUUID(),
-        project_id: DEFAULT_PROJECT_ID,
-        log_date: todayISO,
-        weather: {
-          condition: weatherCondition,
-          temp: weatherTemp ? Number(weatherTemp) : null,
-        },
-        workers: cleanedWorkers,
-        materials: cleanedMaterials,
-        issues: cleanedIssues,
-        notes: notes.trim(),
-        supervisor_name: supervisorName.trim(),
-        sync_status: 'pending',
-      });
+      if (currentLogId) {
+        // Already auto-saved when the first photo was added — update the
+        // same row instead of inserting a duplicate.
+        await databaseManager.updateLog(currentLogId, payload);
+      } else {
+        await databaseManager.insertLog({
+          id: generateUUID(),
+          ...payload,
+          sync_status: 'pending',
+        });
+      }
 
       Alert.alert('Saved', 'Daily log saved successfully.', [
         { text: 'OK', onPress: () => router.back() },
@@ -377,6 +573,69 @@ export default function LogEntryScreen() {
             )}
           </View>
 
+          {/* Photos (Phase 2) */}
+          <View style={styles.section}>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={styles.label}>
+                Photos{photos.length > 0 ? ` (${photos.length})` : ''}
+              </Text>
+              {photoLoading && <ActivityIndicator size="small" color="#1D4ED8" />}
+            </View>
+
+            <View style={styles.photoButtonRow}>
+              <TouchableOpacity
+                style={styles.photoActionButton}
+                onPress={takePhoto}
+                disabled={photoLoading}
+              >
+                <Text style={styles.photoActionButtonText}>📷 Take Photo</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.photoActionButton}
+                onPress={pickPhoto}
+                disabled={photoLoading}
+              >
+                <Text style={styles.photoActionButtonText}>🖼 Pick from Gallery</Text>
+              </TouchableOpacity>
+            </View>
+
+            {photos.length === 0 ? (
+              <Text style={styles.emptyHint}>No photos added yet.</Text>
+            ) : (
+              <View style={styles.photoGrid}>
+                {photos.map((photo) => {
+                  const badge =
+                    PHOTO_SYNC_STYLES[photo.sync_status] ?? PHOTO_SYNC_STYLES.pending;
+                  return (
+                    <TouchableOpacity
+                      key={photo.id}
+                      style={styles.photoThumbWrapper}
+                      onPress={() => viewPhoto(photo)}
+                      onLongPress={() => removePhoto(photo.id, photo.file_path)}
+                      delayLongPress={350}
+                    >
+                      <Image
+                        source={{ uri: photo.file_path }}
+                        style={styles.photoThumb}
+                      />
+                      <View
+                        style={[
+                          styles.photoBadge,
+                          { backgroundColor: badge.backgroundColor },
+                        ]}
+                      >
+                        <Text style={[styles.photoBadgeText, { color: badge.color }]}>
+                          {badge.label}
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
+            <Text style={styles.photoHint}>Tap a photo to view · Long press to delete</Text>
+          </View>
+
           {/* Notes */}
           <View style={styles.section}>
             <Text style={styles.label}>Notes</Text>
@@ -403,6 +662,40 @@ export default function LogEntryScreen() {
           </TouchableOpacity>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      {/* Full-screen photo viewer */}
+      <Modal
+        visible={modalVisible}
+        animationType="fade"
+        transparent={false}
+        onRequestClose={closeModal}
+      >
+        <SafeAreaView style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <TouchableOpacity onPress={closeModal} style={styles.modalCloseButton}>
+              <Text style={styles.modalCloseText}>✕ Close</Text>
+            </TouchableOpacity>
+            {modalPhoto && (
+              <TouchableOpacity
+                onPress={() => {
+                  closeModal();
+                  removePhoto(modalPhoto.id, modalPhoto.file_path);
+                }}
+                style={styles.modalDeleteButton}
+              >
+                <Text style={styles.modalDeleteText}>Delete</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          {modalPhoto && (
+            <Image
+              source={{ uri: modalPhoto.file_path }}
+              style={styles.modalImage}
+              resizeMode="contain"
+            />
+          )}
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -508,4 +801,55 @@ const styles = StyleSheet.create({
   },
   saveButtonDisabled: { opacity: 0.6 },
   saveButtonText: { color: '#FFFFFF', fontSize: 18, fontWeight: '700' },
+
+  // --- Phase 2: photo styles ---
+  photoButtonRow: { flexDirection: 'row', gap: 10, marginBottom: 14 },
+  photoActionButton: {
+    flex: 1,
+    backgroundColor: '#EFF6FF',
+    borderRadius: 10,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  photoActionButtonText: { color: '#1D4ED8', fontWeight: '600', fontSize: 14 },
+  photoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  photoThumbWrapper: {
+    width: 90,
+    height: 90,
+    borderRadius: 10,
+    overflow: 'hidden',
+    position: 'relative',
+    backgroundColor: '#E5E7EB',
+  },
+  photoThumb: { width: '100%', height: '100%' },
+  photoBadge: {
+    position: 'absolute',
+    bottom: 4,
+    left: 4,
+    right: 4,
+    borderRadius: 6,
+    paddingVertical: 2,
+    alignItems: 'center',
+  },
+  photoBadgeText: { fontSize: 10, fontWeight: '700' },
+  photoHint: { fontSize: 12, color: '#9CA3AF', marginTop: 10 },
+
+  modalContainer: { flex: 1, backgroundColor: '#000000' },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  modalCloseButton: { padding: 8 },
+  modalCloseText: { color: '#FFFFFF', fontSize: 16, fontWeight: '600' },
+  modalDeleteButton: {
+    backgroundColor: '#DC2626',
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+  },
+  modalDeleteText: { color: '#FFFFFF', fontSize: 14, fontWeight: '700' },
+  modalImage: { flex: 1, width: '100%' },
 });

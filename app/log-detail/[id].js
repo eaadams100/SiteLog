@@ -1,53 +1,83 @@
 /**
  * app/log-detail/[id].js
  *
- * Route: "/log-detail/:id". Router equivalent of the old LogDetailScreen.js.
- * The only real change is where the id comes from: Router exposes dynamic
- * segments via useLocalSearchParams() instead of a route.params prop.
+ * Route: "/log-detail/:id". Read-only detail view for a single log.
+ *
+ * Phase 2 adds a photo grid pulled from the `photos` table (via
+ * getPhotosForLog), a photo count in the section header, and a
+ * full-screen tap-to-view modal — the same pattern used in log-entry.js,
+ * minus the delete/capture actions, since this screen is read-only.
  */
 
-import React, { useState, useEffect } from 'react';
-import { View, Text, ScrollView, StyleSheet, ActivityIndicator } from 'react-native';
+import React, { useState, useEffect, useCallback } from 'react';
+import {
+  View,
+  Text,
+  ScrollView,
+  StyleSheet,
+  ActivityIndicator,
+  TouchableOpacity,
+  Image,
+  Modal,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams, useFocusEffect } from 'expo-router';
 import databaseManager from '../../db/DatabaseManager';
 import { formatDate, formatTimestamp } from '../../utils/helpers';
 
 export default function LogDetailScreen() {
   const { id: logId } = useLocalSearchParams();
   const [log, setLog] = useState(null);
+  const [photos, setPhotos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [modalPhoto, setModalPhoto] = useState(null);
+  const [modalVisible, setModalVisible] = useState(false);
 
-  useEffect(() => {
-    let isMounted = true;
-
-    async function loadLog() {
-      try {
-        const result = await databaseManager.getLogById(logId);
-        if (isMounted) {
-          setLog(result);
-          if (!result) setError('Log not found.');
-        }
-      } catch (err) {
-        console.error('Failed to load log detail:', err);
-        if (isMounted) setError('Could not load this log.');
-      } finally {
-        if (isMounted) setLoading(false);
-      }
-    }
-
-    if (logId) {
-      loadLog();
-    } else {
+  const loadLogAndPhotos = useCallback(async () => {
+    if (!logId) {
       setLoading(false);
       setError('No log specified.');
+      return;
     }
-
-    return () => {
-      isMounted = false;
-    };
+    try {
+      const [logResult, photosResult] = await Promise.all([
+        databaseManager.getLogById(logId),
+        databaseManager.getPhotosForLog(logId),
+      ]);
+      setLog(logResult);
+      setPhotos(photosResult);
+      if (!logResult) setError('Log not found.');
+      else setError(null);
+    } catch (err) {
+      console.error('Failed to load log detail:', err);
+      setError('Could not load this log.');
+    } finally {
+      setLoading(false);
+    }
   }, [logId]);
+
+  useEffect(() => {
+    loadLogAndPhotos();
+  }, [loadLogAndPhotos]);
+
+  // Refresh photos/log whenever this screen regains focus, in case photos
+  // were added or removed elsewhere (or the log was edited).
+  useFocusEffect(
+    useCallback(() => {
+      loadLogAndPhotos();
+    }, [loadLogAndPhotos])
+  );
+
+  const viewPhoto = (photo) => {
+    setModalPhoto(photo);
+    setModalVisible(true);
+  };
+
+  const closeModal = () => {
+    setModalVisible(false);
+    setModalPhoto(null);
+  };
 
   if (loading) {
     return (
@@ -110,6 +140,29 @@ export default function LogDetailScreen() {
           ))}
         </View>
 
+        {/* Photos (Phase 2) */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Photos ({photos.length})</Text>
+          {photos.length === 0 ? (
+            <Text style={styles.sectionText}>No photos attached.</Text>
+          ) : (
+            <View style={styles.photoGrid}>
+              {photos.map((photo) => (
+                <TouchableOpacity
+                  key={photo.id}
+                  style={styles.photoThumbWrapper}
+                  onPress={() => viewPhoto(photo)}
+                >
+                  <Image
+                    source={{ uri: photo.file_path }}
+                    style={styles.photoThumb}
+                  />
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
+        </View>
+
         {!!log.notes && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Notes</Text>
@@ -120,6 +173,29 @@ export default function LogDetailScreen() {
         <Text style={styles.meta}>Created: {formatTimestamp(log.created_at)}</Text>
         <Text style={styles.meta}>Updated: {formatTimestamp(log.updated_at)}</Text>
       </ScrollView>
+
+      {/* Full-screen photo viewer */}
+      <Modal
+        visible={modalVisible}
+        animationType="fade"
+        transparent={false}
+        onRequestClose={closeModal}
+      >
+        <SafeAreaView style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <TouchableOpacity onPress={closeModal} style={styles.modalCloseButton}>
+              <Text style={styles.modalCloseText}>✕ Close</Text>
+            </TouchableOpacity>
+          </View>
+          {modalPhoto && (
+            <Image
+              source={{ uri: modalPhoto.file_path }}
+              style={styles.modalImage}
+              resizeMode="contain"
+            />
+          )}
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -145,4 +221,21 @@ const styles = StyleSheet.create({
   sectionTitle: { fontSize: 15, fontWeight: '700', color: '#111827', marginBottom: 6 },
   sectionText: { fontSize: 15, color: '#374151', marginBottom: 2 },
   meta: { fontSize: 12, color: '#9CA3AF', marginTop: 16 },
+
+  // --- Phase 2: photo styles ---
+  photoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 4 },
+  photoThumbWrapper: {
+    width: 90,
+    height: 90,
+    borderRadius: 10,
+    overflow: 'hidden',
+    backgroundColor: '#E5E7EB',
+  },
+  photoThumb: { width: '100%', height: '100%' },
+
+  modalContainer: { flex: 1, backgroundColor: '#000000' },
+  modalHeader: { paddingHorizontal: 16, paddingVertical: 12 },
+  modalCloseButton: { alignSelf: 'flex-start', padding: 8 },
+  modalCloseText: { color: '#FFFFFF', fontSize: 16, fontWeight: '600' },
+  modalImage: { flex: 1, width: '100%' },
 });
