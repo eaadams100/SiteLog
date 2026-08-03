@@ -47,7 +47,14 @@
           }
         }
       ],
-      "expo-sqlite"
+      "expo-sqlite",
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "SiteLog uses your camera to capture photos of site conditions for daily logs.",
+          "photosPermission": "SiteLog uses your photo library so you can attach existing photos to daily logs."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

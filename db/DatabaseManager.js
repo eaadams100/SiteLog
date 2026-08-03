@@ -4,7 +4,7 @@
  * Wraps all SQLite + local file access for SiteLog behind a single class so
  * screens never touch raw SQL or the filesystem directly. Built on the
  * modern async expo-sqlite API (SQLite.openDatabaseAsync / execAsync /
- * runAsync / getAllAsync), which ships with expo-sqlite ~14 (Expo SDK 51+).
+ * runAsync / getAllAsync), which ships with expo-sqlite ~14+ (Expo SDK 51+).
  *
  * JSON columns (weather, workers, materials, issues) are stored as TEXT and
  * transparently serialized/deserialized on the way in and out, so callers
@@ -13,16 +13,26 @@
  * Phase 2 adds a `photos` table plus local-file storage for captured
  * images. The database only ever stores a file_path (and metadata) — never
  * image bytes — so `logs.db` stays small and fast to query. Photo files
- * live under `${FileSystem.documentDirectory}photos/`.
+ * live under `${Paths.document}/photos/`.
+ *
+ * File access uses the class-based File/Directory/Paths API from
+ * expo-file-system, which became the stable default import in Expo SDK 54
+ * (expo-file-system ~19). The old functional API
+ * (FileSystem.documentDirectory / getInfoAsync / copyAsync / deleteAsync /
+ * makeDirectoryAsync) now throws at runtime when imported from
+ * 'expo-file-system' directly — it only still works via the explicit
+ * 'expo-file-system/legacy' import, which is itself on a deprecation path.
+ * If your project is on Expo SDK ≤53, swap this import for the older
+ * `import * as FileSystem from 'expo-file-system'` functional calls instead.
  */
 
 import * as SQLite from 'expo-sqlite';
-import * as FileSystem from 'expo-file-system';
+import { File, Directory, Paths } from 'expo-file-system';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { generateUUID, getCurrentTimestamp, safeJSONParse } from '../utils/helpers';
 
 const DATABASE_NAME = 'sitelog.db';
-const PHOTOS_DIR = `${FileSystem.documentDirectory}photos/`;
+const PHOTOS_DIR_NAME = 'photos';
 const PHOTO_COMPRESS_WIDTH = 800;
 const PHOTO_COMPRESS_QUALITY = 0.7; // 0-1, JPEG quality
 
@@ -30,6 +40,9 @@ class DatabaseManager {
   constructor() {
     this.db = null;
     this._initPromise = null;
+    // Lazily created Directory instance for photo storage — see
+    // ensurePhotosDirectory().
+    this._photosDirectory = null;
   }
 
   /**
@@ -360,18 +373,21 @@ class DatabaseManager {
   // =========================================================================
 
   /**
-   * Ensures the local photos directory exists. Safe to call repeatedly.
-   * Called automatically from initDatabase(), but exposed publicly too in
-   * case a caller wants to double-check before a write (e.g. after the app
-   * was reinstalled and documentDirectory changed).
+   * Ensures the local photos directory exists and returns the Directory
+   * instance for it. Safe to call repeatedly — cheap once the directory has
+   * been created. Called automatically from initDatabase(), but exposed
+   * publicly too in case a caller wants to double-check before a write.
    *
-   * @returns {Promise<void>}
+   * @returns {Promise<Directory>}
    */
   async ensurePhotosDirectory() {
-    const dirInfo = await FileSystem.getInfoAsync(PHOTOS_DIR);
-    if (!dirInfo.exists) {
-      await FileSystem.makeDirectoryAsync(PHOTOS_DIR, { intermediates: true });
+    if (!this._photosDirectory) {
+      this._photosDirectory = new Directory(Paths.document, PHOTOS_DIR_NAME);
     }
+    if (!this._photosDirectory.exists) {
+      this._photosDirectory.create();
+    }
+    return this._photosDirectory;
   }
 
   /**
@@ -389,7 +405,7 @@ class DatabaseManager {
    */
   async savePhoto(photoUri, logId) {
     this._assertReady();
-    await this.ensurePhotosDirectory();
+    const photosDirectory = await this.ensurePhotosDirectory();
 
     // Resize to a fixed width; ImageManipulator preserves aspect ratio when
     // only one dimension is given.
@@ -403,25 +419,19 @@ class DatabaseManager {
     );
 
     const photoId = generateUUID();
-    const destinationPath = `${PHOTOS_DIR}${photoId}.jpg`;
 
     // manipulateAsync writes its output to a cache/tmp location; copy it
     // into our permanent photos directory so it survives app restarts and
     // isn't cleared by the OS reclaiming cache space.
-    await FileSystem.copyAsync({
-      from: manipulated.uri,
-      to: destinationPath,
-    });
-
-    const fileInfo = await FileSystem.getInfoAsync(destinationPath, {
-      size: true,
-    });
+    const sourceFile = new File(manipulated.uri);
+    const destinationFile = new File(photosDirectory, `${photoId}.jpg`);
+    sourceFile.copy(destinationFile);
 
     return this.insertPhoto({
       id: photoId,
       log_id: logId,
-      file_path: destinationPath,
-      file_size: fileInfo.exists ? fileInfo.size : null,
+      file_path: destinationFile.uri,
+      file_size: destinationFile.exists ? destinationFile.size : null,
       width: manipulated.width,
       height: manipulated.height,
       sync_status: 'pending',
@@ -531,7 +541,7 @@ class DatabaseManager {
   async deletePhoto(photoId, filePath) {
     this._assertReady();
     if (filePath) {
-      await FileSystem.deleteAsync(filePath, { idempotent: true });
+      await this._deleteFileIfExists(filePath);
     }
     await this.db.runAsync(`DELETE FROM photos WHERE id = ?;`, [photoId]);
   }
@@ -549,12 +559,33 @@ class DatabaseManager {
     const photos = await this.getPhotosForLog(logId);
 
     await Promise.all(
-      photos.map((photo) =>
-        FileSystem.deleteAsync(photo.file_path, { idempotent: true })
-      )
+      photos.map((photo) => this._deleteFileIfExists(photo.file_path))
     );
 
     await this.db.runAsync(`DELETE FROM photos WHERE log_id = ?;`, [logId]);
+  }
+
+  /**
+   * Deletes a file by path if it exists, swallowing "already gone" errors
+   * so callers get idempotent behavior — matching the old
+   * `FileSystem.deleteAsync(path, { idempotent: true })` semantics, since
+   * the new File class doesn't have a built-in idempotent option.
+   *
+   * @private
+   * @param {string} filePath
+   * @returns {Promise<void>}
+   */
+  async _deleteFileIfExists(filePath) {
+    try {
+      const file = new File(filePath);
+      if (file.exists) {
+        await file.delete();
+      }
+    } catch (err) {
+      // File already gone, or otherwise inaccessible — treat as a no-op
+      // rather than letting a delete-a-log-with-photos flow blow up.
+      console.warn(`DatabaseManager: could not delete photo file at ${filePath}:`, err);
+    }
   }
 }
 
