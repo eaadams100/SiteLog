@@ -32,6 +32,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import databaseManager from '../db/DatabaseManager';
+import syncService from '../services/SyncService';
 import {
   generateUUID,
   getTodayISODate,
@@ -39,7 +40,15 @@ import {
 } from '../utils/helpers';
 
 const WEATHER_CONDITIONS = ['Sunny', 'Cloudy', 'Rain', 'Storm', 'Snow', 'Windy'];
-const DEFAULT_PROJECT_ID = 'default-project';
+// This must be a real UUID matching a row in the backend's `projects`
+// table — the backend schema has `daily_logs.project_id UUID NOT NULL
+// REFERENCES projects (project_id)`, so a plain string like
+// "default-project" would fail every sync with a foreign key violation.
+// This value matches the project seeded by `backend/src/db/seed.js` — if
+// you change one, change the other, or better yet build a real project
+// picker (see backend/README.md's "What's next" section) and stop relying
+// on a hardcoded default entirely.
+const DEFAULT_PROJECT_ID = '76f663d3-aeff-40f3-b7d6-7c8e0f7e83a0';
 
 const PHOTO_SYNC_STYLES = {
   pending: { backgroundColor: '#FEF3C7', color: '#92400E', label: 'Pending' },
@@ -376,6 +385,13 @@ export default function LogEntryScreen() {
       Alert.alert('Saved', 'Daily log saved successfully.', [
         { text: 'OK', onPress: () => router.back() },
       ]);
+
+      // Fire-and-forget: check for pending logs and sync if online. Not
+      // awaited, since the person shouldn't have to wait for a network
+      // round trip just to leave this screen — syncIfNeeded() only
+      // actually runs a sync if there's something pending and never
+      // throws, so this is safe to leave unhandled.
+      syncService.syncIfNeeded();
     } catch (err) {
       console.error('Failed to save log:', err);
       Alert.alert(

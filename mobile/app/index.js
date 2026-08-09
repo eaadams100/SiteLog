@@ -2,9 +2,10 @@
  * app/index.js
  *
  * Route: "/" (home screen). Router equivalent of the old LogsListScreen.js.
- * Only the navigation calls changed (router.push instead of
- * navigation.navigate) — everything else, including the data logic, is
- * identical to the React Navigation version.
+ *
+ * Phase 4 adds the sync status bar (SyncButton, which is self-contained
+ * and handles its own state) above the list, and emoji on each log
+ * card's sync badge.
  */
 
 import React, { useState, useCallback } from 'react';
@@ -22,11 +23,12 @@ import { useFocusEffect } from '@react-navigation/native';
 import { router } from 'expo-router';
 import databaseManager from '../db/DatabaseManager';
 import { formatDate } from '../utils/helpers';
+import SyncButton from '../components/SyncButton';
 
 const SYNC_STATUS_STYLES = {
-  pending: { backgroundColor: '#FEF3C7', color: '#92400E', label: 'Pending' },
-  synced: { backgroundColor: '#D1FAE5', color: '#065F46', label: 'Synced' },
-  failed: { backgroundColor: '#FEE2E2', color: '#991B1B', label: 'Failed' },
+  pending: { backgroundColor: '#FEF3C7', color: '#92400E', label: 'Pending ⏳' },
+  synced: { backgroundColor: '#D1FAE5', color: '#065F46', label: 'Synced ✅' },
+  failed: { backgroundColor: '#FEE2E2', color: '#991B1B', label: 'Failed ❌' },
 };
 
 function SyncBadge({ status }) {
@@ -131,6 +133,7 @@ export default function LogsListScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['bottom']}>
+      <SyncButton />
       <FlatList
         data={logs}
         keyExtractor={(item) => item.id}

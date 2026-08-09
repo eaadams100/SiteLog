@@ -5,15 +5,30 @@
  * old App.js: it initializes the local SQLite database before any screen
  * renders, then hands off to a <Stack /> for file-based navigation between
  * routes in this folder (index, log-entry, log-detail/[id]).
+ *
+ * Phase 4 adds sync engine startup here: once the database is ready, it
+ * loads the persisted "last synced at" value, then wires up automatic
+ * sync (on reconnect, on app foreground, and on a periodic interval) via
+ * SyncService.startAutoSync(). Cleanup on unmount tears all of that back
+ * down — in practice this layout doesn't usually unmount during the app's
+ * lifetime, but it's correct either way.
  */
 
 import React, { useState, useEffect } from 'react';
-import { View, Text, ActivityIndicator, StyleSheet } from 'react-native';
+import { View, Text, ActivityIndicator, StyleSheet, AppState } from 'react-native';
 import { Stack } from 'expo-router';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
+import NetInfo from '@react-native-community/netinfo';
 
 import databaseManager from '../db/DatabaseManager';
+import syncService from '../services/SyncService';
+
+// How often to auto-sync while the app is open and there are pending
+// logs, in addition to the reconnect/foreground triggers. 5 minutes is a
+// reasonable default for a site log app — logs aren't urgent enough to
+// need near-real-time sync, but shouldn't sit unsynced all day either.
+const AUTO_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 
 export default function RootLayout() {
   const [isDbReady, setIsDbReady] = useState(false);
@@ -24,6 +39,11 @@ export default function RootLayout() {
       try {
         await databaseManager.initDatabase();
         setIsDbReady(true);
+
+        // Load "last synced at" before wiring up auto-sync, so the UI has
+        // a correct value the moment the list screen renders rather than
+        // flashing "never synced" for a beat.
+        await syncService.loadPersistedState();
       } catch (err) {
         console.error('Failed to initialize database:', err);
         setInitError(
@@ -33,6 +53,22 @@ export default function RootLayout() {
     }
     setup();
   }, []);
+
+  // Auto-sync wiring — only after the database (and therefore
+  // syncService's persisted state) is ready. Separate effect from the one
+  // above so this cleanly re-runs its cleanup if isDbReady ever flips back
+  // to false, though that shouldn't normally happen post-init.
+  useEffect(() => {
+    if (!isDbReady) return undefined;
+
+    const cleanup = syncService.startAutoSync({
+      NetInfo,
+      AppState,
+      intervalMs: AUTO_SYNC_INTERVAL_MS,
+    });
+
+    return cleanup;
+  }, [isDbReady]);
 
   if (initError) {
     return (

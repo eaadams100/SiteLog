@@ -114,6 +114,20 @@ class DatabaseManager {
         CREATE INDEX IF NOT EXISTS idx_photos_sync_status ON photos (sync_status);
       `);
 
+      // --- Phase 4: tiny key-value settings table ---
+      // Everything else Phase 4 needs (getPendingLogs, getPendingPhotos,
+      // updateSyncStatus, updatePhotoSyncStatus, getLogsByDateRange)
+      // already existed from Phases 1-2. This is the one genuinely new
+      // piece of storage needed: a place to persist app-level sync
+      // metadata (currently just "last synced at") across app restarts,
+      // without a whole new table per setting.
+      await db.execAsync(`
+        CREATE TABLE IF NOT EXISTS app_settings (
+          key TEXT PRIMARY KEY NOT NULL,
+          value TEXT
+        );
+      `);
+
       this.db = db;
 
       // Make sure the on-disk photos folder exists before anyone tries to
@@ -586,6 +600,43 @@ class DatabaseManager {
       // rather than letting a delete-a-log-with-photos flow blow up.
       console.warn(`DatabaseManager: could not delete photo file at ${filePath}:`, err);
     }
+  }
+
+  // =========================================================================
+  // App settings (Phase 4) — small persistent key-value store, currently
+  // just used for "last synced at", but generic enough for future use
+  // (e.g. selected project id, once a real project picker exists).
+  // =========================================================================
+
+  /**
+   * Retrieves a single setting value by key. Returns null if unset.
+   *
+   * @param {string} key
+   * @returns {Promise<string|null>}
+   */
+  async getSetting(key) {
+    this._assertReady();
+    const row = await this.db.getFirstAsync(
+      `SELECT value FROM app_settings WHERE key = ?;`,
+      [key]
+    );
+    return row ? row.value : null;
+  }
+
+  /**
+   * Sets (or replaces) a setting value.
+   *
+   * @param {string} key
+   * @param {string} value
+   * @returns {Promise<void>}
+   */
+  async setSetting(key, value) {
+    this._assertReady();
+    await this.db.runAsync(
+      `INSERT INTO app_settings (key, value) VALUES (?, ?)
+       ON CONFLICT (key) DO UPDATE SET value = excluded.value;`,
+      [key, value]
+    );
   }
 }
 

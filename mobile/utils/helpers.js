@@ -91,6 +91,41 @@ export function formatTimestamp(isoTimestamp) {
 }
 
 /**
+ * Formats an ISO timestamp as a short relative time string, e.g.
+ * "just now", "5 min ago", "3 hr ago", "2 days ago". Falls back to
+ * formatTimestamp() for anything more than a week old, where a relative
+ * string stops being more useful than an actual date.
+ *
+ * @param {string} isoTimestamp
+ * @returns {string}
+ */
+export function formatRelativeTime(isoTimestamp) {
+  if (!isoTimestamp) return '';
+  try {
+    const then = new Date(isoTimestamp).getTime();
+    const now = Date.now();
+    const diffMs = now - then;
+    if (diffMs < 0) return 'just now';
+
+    const diffSec = Math.floor(diffMs / 1000);
+    if (diffSec < 60) return 'just now';
+
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return `${diffMin} min ago`;
+
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return `${diffHr} hr ago`;
+
+    const diffDays = Math.floor(diffHr / 24);
+    if (diffDays < 7) return `${diffDays} day${diffDays === 1 ? '' : 's'} ago`;
+
+    return formatTimestamp(isoTimestamp);
+  } catch (err) {
+    return isoTimestamp;
+  }
+}
+
+/**
  * Safely parses a JSON string, returning a fallback value on failure.
  * Used when reading JSON columns back out of SQLite.
  *
