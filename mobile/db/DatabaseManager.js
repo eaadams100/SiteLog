@@ -322,6 +322,45 @@ class DatabaseManager {
   }
 
   /**
+   * Updates specific content fields of a local log — used after a Phase 5
+   * conflict resolution, to overwrite this device's local copy with the
+   * server's merged/canonical version. Only ever touches the fields
+   * explicitly passed in `fields` (a partial update), and only fields on
+   * an allow-list — never id/created_at/sync_status, which have their own
+   * dedicated update paths elsewhere.
+   *
+   * @param {string} logId
+   * @param {Object} fields - any subset of: weather, workers, materials, issues, notes, supervisor_name
+   * @returns {Promise<void>}
+   */
+  async updateLogFields(logId, fields) {
+    this._assertReady();
+
+    const allowedFields = ['weather', 'workers', 'materials', 'issues', 'notes', 'supervisor_name'];
+    const jsonFields = ['weather', 'workers', 'materials', 'issues'];
+
+    const setClauses = [];
+    const params = [];
+
+    for (const field of allowedFields) {
+      if (fields[field] === undefined) continue;
+      setClauses.push(`${field} = ?`);
+      params.push(jsonFields.includes(field) ? JSON.stringify(fields[field]) : fields[field]);
+    }
+
+    if (setClauses.length === 0) return; // nothing recognized to update
+
+    setClauses.push('updated_at = ?');
+    params.push(getCurrentTimestamp());
+    params.push(logId);
+
+    await this.db.runAsync(
+      `UPDATE logs SET ${setClauses.join(', ')} WHERE id = ?;`,
+      params
+    );
+  }
+
+  /**
    * Retrieves logs whose log_date falls within [startDate, endDate], inclusive.
    * Dates should be ISO date strings ("YYYY-MM-DD") so lexicographic
    * comparison matches chronological order.

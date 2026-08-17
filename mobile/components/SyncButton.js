@@ -19,7 +19,7 @@ function buildResultMessage(result) {
 
   const parts = [];
   if (result.synced > 0) parts.push(`${result.synced} log${result.synced === 1 ? '' : 's'} synced`);
-  if (result.conflicts > 0) parts.push(`${result.conflicts} conflict${result.conflicts === 1 ? '' : 's'} (flagged for review)`);
+  if (result.conflicts > 0) parts.push(`${result.conflicts} conflict${result.conflicts === 1 ? '' : 's'} automatically merged`);
   if (result.failed > 0) parts.push(`${result.failed} failed`);
 
   if (parts.length === 0) return 'Nothing to sync — you\'re all caught up.';

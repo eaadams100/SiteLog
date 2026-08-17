@@ -26,9 +26,9 @@ import { formatDate } from '../utils/helpers';
 import SyncButton from '../components/SyncButton';
 
 const SYNC_STATUS_STYLES = {
-  pending: { backgroundColor: '#FEF3C7', color: '#92400E', label: 'Pending ⏳' },
-  synced: { backgroundColor: '#D1FAE5', color: '#065F46', label: 'Synced ✅' },
-  failed: { backgroundColor: '#FEE2E2', color: '#991B1B', label: 'Failed ❌' },
+  pending: { backgroundColor: '#FEF3C7', color: '#92400E', label: 'Pending' },
+  synced: { backgroundColor: '#D1FAE5', color: '#065F46', label: 'Synced' },
+  failed: { backgroundColor: '#FEE2E2', color: '#991B1B', label: 'Failed' },
 };
 
 function SyncBadge({ status }) {

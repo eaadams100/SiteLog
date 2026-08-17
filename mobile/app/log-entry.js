@@ -604,14 +604,14 @@ export default function LogEntryScreen() {
                 onPress={takePhoto}
                 disabled={photoLoading}
               >
-                <Text style={styles.photoActionButtonText}>📷 Take Photo</Text>
+                <Text style={styles.photoActionButtonText}>Camera</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.photoActionButton}
                 onPress={pickPhoto}
                 disabled={photoLoading}
               >
-                <Text style={styles.photoActionButtonText}>🖼 Pick from Gallery</Text>
+                <Text style={styles.photoActionButtonText}>Pick from Gallery</Text>
               </TouchableOpacity>
             </View>
 

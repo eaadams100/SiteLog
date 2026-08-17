@@ -36,6 +36,15 @@
  * with the row actually present in daily_logs. This is a single hardcoded
  * default, not a real project picker — see backend/README.md's "What's
  * next" section for that.
+ *
+ * PHASE 5 — conflict resolution:
+ * The backend now auto-resolves conflicts (two logs for the same
+ * project + date) during sync, rather than just flagging them. A
+ * response detail with status "conflict_resolved" means this log's data
+ * got merged with another log's — see _applyResponse below, which
+ * fetches the canonical merged result and overwrites local content with
+ * it. This is the one intentional exception to "local is always the
+ * source of truth until synced" elsewhere in this app.
  */
 
 import databaseManager from '../db/DatabaseManager';
@@ -315,13 +324,56 @@ class SyncService {
   }
 
   /**
+   * Fetches a single log (with current, possibly server-merged, field
+   * values) from GET /api/v1/logs/:id. Used only for the
+   * 'conflict_resolved' case in _applyResponse — the normal sync path
+   * never needs a read-back, since the server accepted exactly what was
+   * sent.
+   *
+   * @private
+   * @param {string} logId
+   * @returns {Promise<Object|null>}
+   */
+  async _fetchLog(logId) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.logs}/${logId}`, {
+        signal: controller.signal,
+      });
+      if (!response.ok) return null;
+      const body = await response.json().catch(() => null);
+      return body?.log ?? null;
+    } catch (err) {
+      console.warn(`SyncService: failed to fetch log ${logId} after conflict resolution:`, err);
+      return null;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  /**
    * Applies a sync response to local storage: updates each log's (and its
-   * photos') sync_status based on what the backend reported. A log with
-   * status "conflict" is treated as a successful sync from the device's
-   * point of view — the backend safely stored the data (see
-   * backend/README.md's conflict resolution notes); it's the *server
-   * side* that has a conflict to resolve, not this device. Only "error"
-   * results in a local 'failed' status.
+   * photos') sync_status based on what the backend reported.
+   *
+   * PHASE 5 BEHAVIOR: a log with status "conflict_resolved" means the
+   * backend detected another log for the same project + date and
+   * automatically merged them (Last-Write-Wins for scalar fields, union
+   * for arrays — see backend/README.md). Unlike Phase 4's older
+   * "conflict" status (server flags it, does nothing further), this
+   * device's local copy is now genuinely out of date — it might be
+   * missing worker/material/issue entries the OTHER device submitted, or
+   * have stale weather/notes if the other device's edit was more recent.
+   * So this fetches the canonical merged log from the server
+   * (detail.primary_log_id — the merge target might be a DIFFERENT log_id
+   * than the one this device submitted, if the other device's log was
+   * chosen as primary) and overwrites local content with it via
+   * updateLogFields(). This is the one place in the app where server data
+   * is allowed to overwrite local data — everywhere else, local is always
+   * the source of truth until synced.
+   *
+   * Only "error" results in a local 'failed' status.
    *
    * @private
    * @param {Array<Object>} logBatch - the logs that were just sent
@@ -341,12 +393,34 @@ class SyncService {
         continue;
       }
 
-      // 'synced' or 'conflict' both mean the server safely persisted it.
-      await databaseManager.updateSyncStatus(log.id, 'synced');
-      if (detail.status === 'conflict') {
+      if (detail.status === 'conflict_resolved') {
+        // Local row is marked synced regardless of whether the fetch below
+        // succeeds — the merge DID happen server-side either way; a failed
+        // fetch just means this device's local copy stays one step behind
+        // until the next sync, not that anything was lost.
+        await databaseManager.updateSyncStatus(log.id, 'synced');
         result.conflicts += 1;
+
+        const primaryLog = await this._fetchLog(detail.primary_log_id ?? log.id);
+        if (primaryLog) {
+          await databaseManager.updateLogFields(log.id, {
+            weather: primaryLog.weather,
+            workers: primaryLog.workers,
+            materials: primaryLog.materials,
+            issues: primaryLog.issues,
+            notes: primaryLog.notes,
+            supervisor_name: primaryLog.supervisor_name,
+          });
+        }
       } else {
-        result.synced += 1;
+        // 'synced' (and the older Phase 3/4 'conflict' status, kept for
+        // backward compatibility with a not-yet-upgraded backend).
+        await databaseManager.updateSyncStatus(log.id, 'synced');
+        if (detail.status === 'conflict') {
+          result.conflicts += 1;
+        } else {
+          result.synced += 1;
+        }
       }
 
       // Response doesn't grant per-photo acknowledgement, only a count —
