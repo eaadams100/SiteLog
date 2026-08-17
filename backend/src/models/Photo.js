@@ -25,9 +25,10 @@ const { query } = require('../config/db');
  * @param {number} [photoData.height]
  * @param {'pending'|'synced'|'failed'} [photoData.sync_status='synced']
  * @param {string} [photoData.created_at]
+ * @param {import('pg').PoolClient} [client] - pass to participate in an existing transaction; defaults to the shared pool
  * @returns {Promise<Object>} the saved row
  */
-async function create(photoData) {
+async function create(photoData, client = null) {
   const {
     id,
     log_id,
@@ -39,7 +40,9 @@ async function create(photoData) {
     created_at = null,
   } = photoData;
 
-  const result = await query(
+  const exec = client ? (text, params) => client.query(text, params) : query;
+
+  const result = await exec(
     `INSERT INTO photos (
        photo_id, log_id, file_path, file_size, width, height,
        sync_status, created_at

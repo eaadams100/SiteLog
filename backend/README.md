@@ -54,7 +54,7 @@ cp .env.example .env
 # edit .env: paste your Neon connection string into DATABASE_URL
 
 npm run db:migrate   # applies src/db/schema.sql to your database
-npm run dev           # starts the server with auto-restart on file changes
+npm run dev
 ```
 
 Health check: `GET http://localhost:3000/health` — pings the database and
@@ -188,3 +188,198 @@ behavior was wanted.
 - Auth (the spec notes `supervisor_id`/`users` as "optional for MVP" — no auth exists yet, so every endpoint is currently open)
 - A conflict-resolution endpoint that actually applies a chosen merge, rather than just suggesting one
 - Automated tests
+
+---
+
+# Phase 5 — Automatic Conflict Resolution
+
+Extends Phase 3's conflict *detection* into automatic conflict
+*resolution*: when two logs exist for the same project + date, the sync
+endpoint now merges them synchronously, inside a database transaction,
+with a full audit trail — rather than flagging both and waiting for a
+human to review.
+
+## Behavior change from Phase 3 (read this first)
+
+Phase 3 deliberately never auto-merged conflicting logs — both logs were
+kept as separate rows, flagged `sync_status = 'conflict'`, with a
+*suggested* merge computed but not applied. The reasoning at the time:
+silently merging two supervisors' independent submissions risked losing
+or altering someone's data without them knowing.
+
+Phase 5 was explicitly asked to do the opposite: automatic, synchronous
+merging, no review step. That's what's implemented now. The audit-trail
+concern that motivated Phase 3's original design is still addressed, just
+differently:
+- **Every submitted log keeps its own row.** Nothing is deleted or
+  overwritten in a way that loses the original submission.
+- **One log per conflict group becomes "primary"** and gets updated in
+  place with the merged data (`conflict_resolved = true`,
+  `merged_from_logs` recording every log_id folded in).
+- **Every resolution is recorded in `conflict_log`** — an explicit,
+  queryable audit trail of exactly what got merged, when, and how (see
+  `resolution_details` JSONB, which stores the full resolved field values
+  and every log_id involved).
+
+## Primary selection
+
+When a new log conflicts with existing ones, one of the group becomes
+"primary" — deterministically, so resolving the same conflict twice
+never disagrees with itself:
+1. If one of the existing logs is already a primary from an earlier merge
+   (`conflict_resolved = true`), it stays primary — this is what lets a
+   3rd, 4th, ... late-arriving conflicting log join an existing merge
+   group instead of starting a new one.
+2. Otherwise, whichever log has the earliest `created_at` wins.
+
+Note that the **incoming** log can become primary — if a device syncs
+late (e.g. it was offline for days) but its log's `created_at` predates
+what's already stored, it correctly takes over as primary.
+
+## Per-field merge semantics
+
+- **`weather`, `notes`, `supervisor_name`** — Last-Write-Wins, based on
+  each log's `updated_at`.
+- **`workers`** — union keyed by `trade`. If the same trade appears in
+  more than one log, the most-recently-updated log's entry wins (this can
+  mean a worker COUNT gets overwritten, not summed — two "Mason: 4"
+  entries are treated as more likely the same crew logged twice than two
+  different crews; change `conflictResolver.js` if your usage pattern
+  needs summing instead).
+- **`materials`, `issues`** — union with **exact**-duplicate removal
+  only. Two materials are the same only if name AND quantity AND unit all
+  match (issues: description AND flagged). Unlike `workers`, this never
+  collapses two entries that share a name but differ elsewhere — both are
+  kept. This matches the spec's literal wording rather than the
+  partial-key "latest wins" approach used for workers.
+- **Photos are not merged as a stored field** — they aren't a JSONB
+  column on `daily_logs`, they're rows in the separate `photos` table,
+  each already tied to whichever log_id they were submitted under.
+  "Merging" them means `DailyLog.getById()` aggregates photos across the
+  primary log AND everything in its `merged_from_logs` at *read* time,
+  rather than computing and storing a merged photo array that wouldn't
+  map onto the actual schema.
+
+## A real bug this caught (documented so it isn't silently reintroduced)
+
+While testing this against real Postgres, Last-Write-Wins resolution
+initially picked the WRONG log's data — consistently the older log,
+regardless of which one actually had the later `updated_at`. Root cause:
+`DailyLog.upsert()` was unconditionally stamping `updated_at =
+CURRENT_TIMESTAMP` on every insert, discarding whatever `updated_at` the
+client actually sent. So by the time a later conflict check re-read an
+already-synced log from the database, its stored `updated_at` reflected
+*when it happened to sync*, not *when its content was actually last
+edited* — which silently defeats the entire point of Last-Write-Wins.
+This bug existed since Phase 3 but was never caught, because Phase 3
+never persisted or re-inspected resolved field values closely enough to
+expose it.
+
+Fixed in two places (both were necessary — fixing only one wouldn't have
+worked):
+1. `DailyLog.upsert()` now trusts a client-supplied `updated_at`,
+   falling back to `CURRENT_TIMESTAMP` only if none was provided (the
+   same pattern already used for `created_at`).
+2. `syncController.js` was actually missing `updated_at: incoming.updated_at`
+   in the objects passed to `upsert()` — the model fix alone did nothing
+   until the controller was also passing the value through.
+
+Verified fixed via `scripts/test-conflict-scenarios.sh` end to end against
+real Postgres — see that script's Scenario 4/5 assertions.
+
+## Files new/changed
+
+```
+backend/
+├── src/
+│   ├── db/
+│   │   ├── schema.sql                    # updated — conflict_resolved, merged_from_logs, conflict_log table (idempotent ALTER COLUMN IF NOT EXISTS)
+│   │   └── test-data-conflicts.sql       # NEW — baseline data for the 7 test scenarios
+│   ├── models/
+│   │   ├── DailyLog.js                   # updated — applyConflictResolution(), transaction-aware upsert(), updated_at fix
+│   │   ├── Photo.js                      # updated — transaction-aware create()
+│   │   └── ConflictLog.js                # NEW — audit trail model
+│   ├── services/
+│   │   └── conflictResolver.js           # rewritten — auto-merge logic, primary selection, per-field merge semantics
+│   ├── controllers/
+│   │   ├── syncController.js             # rewritten — transactional conflict resolution flow
+│   │   ├── logController.js              # slimmed — conflict logic moved out
+│   │   └── conflictController.js         # NEW — GET /api/v1/conflicts, now serves audit history
+│   └── routes/
+│       └── conflictRoutes.js             # updated — points at conflictController
+└── scripts/
+    └── test-conflict-scenarios.sh        # NEW — runnable end-to-end test for all 7 scenarios, verified passing
+```
+
+## Response shape (kept, not replaced)
+
+The doc proposed wrapping the sync response in a `data` field. That's
+**not** what's implemented — the existing, already-tested
+`{ success, summary, details }` shape is kept, since switching to a
+`data` wrapper now would break the already-working Phase 4 mobile sync
+code for no functional benefit. `details[]` items just gained new fields:
+
+```json
+{
+  "log_id": "uuid",
+  "status": "conflict_resolved",
+  "conflict_resolved": true,
+  "primary_log_id": "uuid",
+  "merged_from": ["uuid1", "uuid2"],
+  "updated_at": "2026-08-01T15:00:00.000Z",
+  "photosSynced": 1
+}
+```
+
+`primary_log_id` may differ from `log_id` — it's whichever log in the
+conflict group was chosen as primary, which might not be the log that was
+just synced (see "Primary selection" above).
+
+## `GET /api/v1/conflicts` — now conflict history, not a review queue
+
+Phase 3's version of this endpoint listed logs stuck in
+`sync_status = 'conflict'`, awaiting human review. Since Phase 5 resolves
+automatically, nothing normally stays in that state — so this endpoint
+now serves the `conflict_log` audit trail instead: "here's every
+automatic merge that's happened," not "here's what's waiting on you."
+
+```
+GET /api/v1/conflicts?projectId=...&limit=...&offset=...
+```
+
+Each entry includes `resolution_details` (the full merged field values
+and every log_id involved) and the primary log's current state.
+
+## Atomicity
+
+Each log's entire processing — conflict detection's writes, the primary
+log update, the audit log entry, the incoming log's own upsert, and all
+of its photos — runs inside a single database transaction
+(`BEGIN`/`COMMIT`/`ROLLBACK` via `getClient()`). If any step fails, the
+whole thing rolls back and the failure is recorded to `sync_errors` (per
+Phase 3's existing per-log isolation — one bad log in a batch still
+doesn't fail the whole sync request).
+
+## Running the test scenarios yourself
+
+```bash
+cd backend
+# Point at a SCRATCH database — this inserts test data, don't run against production
+DATABASE_URL="postgresql://...scratch-db..." npm run db:migrate
+psql "$DATABASE_URL" -f src/db/test-data-conflicts.sql
+DATABASE_URL="postgresql://...scratch-db..." npm start &
+
+API_BASE_URL=http://localhost:3000 ./scripts/test-conflict-scenarios.sh
+```
+
+Covers all 7 scenarios from the spec: same project+date conflict,
+different-project no-conflict, different-date no-conflict, LWW picking
+local-newer, LWW picking cloud-newer, array union removing exact
+duplicates, array union keeping unique items.
+
+## What's next
+
+- Manual conflict override/re-resolution endpoint (the spec's "allows
+  manual resolution (future)" — still future)
+- Cloud photo storage (unchanged from Phase 3 — still metadata-only sync)
+- Auth

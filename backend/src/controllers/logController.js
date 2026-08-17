@@ -1,9 +1,9 @@
 /**
  * src/controllers/logController.js
  *
- * Handles the read-side endpoints the mobile app and web dashboard use to
- * fetch synced data back: GET /api/v1/logs, GET /api/v1/logs/:id, and
- * GET /api/v1/conflicts.
+ * Handles the read-side endpoints for logs: GET /api/v1/logs and
+ * GET /api/v1/logs/:id. Conflict-related reads moved to
+ * conflictController.js (Phase 5) for clean separation.
  */
 
 const DailyLog = require('../models/DailyLog');
@@ -41,6 +41,11 @@ async function getLogs(req, res, next) {
 
 /**
  * GET /api/v1/logs/:id
+ *
+ * Note: if this log is a conflict-resolution primary (conflict_resolved
+ * = true), the returned `photos` array includes photos from every log in
+ * merged_from_logs too, not just this log's own — see
+ * DailyLog.getById()'s comment for why.
  */
 async function getLogById(req, res, next) {
   try {
@@ -54,16 +59,4 @@ async function getLogById(req, res, next) {
   }
 }
 
-/**
- * GET /api/v1/conflicts?projectId=...
- */
-async function getConflicts(req, res, next) {
-  try {
-    const conflicts = await DailyLog.getUnresolvedConflicts(req.query.projectId || null);
-    res.json({ success: true, count: conflicts.length, conflicts });
-  } catch (err) {
-    next(err);
-  }
-}
-
-module.exports = { getLogs, getLogById, getConflicts };
+module.exports = { getLogs, getLogById };

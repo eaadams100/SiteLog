@@ -11,7 +11,7 @@
 
 const { query } = require('../config/db');
 
-const VALID_SYNC_STATUSES = ['pending', 'synced', 'failed', 'conflict'];
+const VALID_SYNC_STATUSES = ['pending', 'synced', 'failed', 'conflict', 'conflict_resolved'];
 
 /**
  * Inserts a new daily log, or updates it in place if a row with the same
@@ -29,11 +29,13 @@ const VALID_SYNC_STATUSES = ['pending', 'synced', 'failed', 'conflict'];
  * @param {Array} [logData.issues]
  * @param {string} [logData.notes]
  * @param {string} logData.supervisor_name
- * @param {'pending'|'synced'|'failed'|'conflict'} [logData.sync_status='synced']
+ * @param {'pending'|'synced'|'failed'|'conflict'|'conflict_resolved'} [logData.sync_status='synced']
  * @param {string} [logData.created_at] - ISO timestamp from the client; only used on first insert
+ * @param {string} [logData.updated_at] - ISO timestamp from the client, representing when the log's CONTENT was last edited on-device. Trusted as-is (falling back to CURRENT_TIMESTAMP only if absent) rather than always stamped with the server's insert time — conflict resolution's Last-Write-Wins logic depends on this reflecting real edit order, not sync/arrival order. See the bug this fixes: previously every upsert overwrote updated_at with the server's current time regardless of what the client sent, which silently broke LWW comparisons for any log that had already been synced once (its stored updated_at became "whenever it happened to sync", making a later conflict check compare arrival order instead of edit order).
+ * @param {import('pg').PoolClient} [client] - pass to participate in an existing transaction (Phase 5's conflict-merge flow); defaults to the shared pool
  * @returns {Promise<Object>} the saved row
  */
-async function upsert(logData) {
+async function upsert(logData, client = null) {
   const {
     id,
     project_id,
@@ -47,13 +49,16 @@ async function upsert(logData) {
     supervisor_name,
     sync_status = 'synced',
     created_at = null,
+    updated_at = null,
   } = logData;
 
   if (!VALID_SYNC_STATUSES.includes(sync_status)) {
     throw new Error(`DailyLog.upsert: invalid sync_status "${sync_status}"`);
   }
 
-  const result = await query(
+  const exec = client ? (text, params) => client.query(text, params) : query;
+
+  const result = await exec(
     `INSERT INTO daily_logs (
        log_id, project_id, supervisor_id, log_date, weather, workers,
        materials, issues, notes, supervisor_name, sync_status,
@@ -61,7 +66,7 @@ async function upsert(logData) {
      ) VALUES (
        $1, $2, $3, $4, $5::jsonb, $6::jsonb,
        $7::jsonb, $8::jsonb, $9, $10, $11,
-       COALESCE($12::timestamp, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP
+       COALESCE($12::timestamp, CURRENT_TIMESTAMP), COALESCE($13::timestamp, CURRENT_TIMESTAMP)
      )
      ON CONFLICT (log_id) DO UPDATE SET
        project_id = EXCLUDED.project_id,
@@ -74,7 +79,7 @@ async function upsert(logData) {
        notes = EXCLUDED.notes,
        supervisor_name = EXCLUDED.supervisor_name,
        sync_status = EXCLUDED.sync_status,
-       updated_at = CURRENT_TIMESTAMP
+       updated_at = COALESCE($13::timestamp, CURRENT_TIMESTAMP)
      RETURNING *;`,
     [
       id,
@@ -89,6 +94,7 @@ async function upsert(logData) {
       supervisor_name,
       sync_status,
       created_at,
+      updated_at,
     ]
   );
 
@@ -123,6 +129,13 @@ async function getByProject(projectId, startDate = null, endDate = null, limit =
  * Retrieves a single log by id, with its photos attached as a nested
  * array (empty array if none). Returns null if not found.
  *
+ * Phase 5: if this log is a merge primary (conflict_resolved = true,
+ * merged_from_logs non-empty), photos are aggregated across this log AND
+ * every log in merged_from_logs — not just this log's own log_id. Photos
+ * are never physically moved between logs (see conflictResolver.js's file
+ * header for why), so "merging" them means showing them all together at
+ * read time instead.
+ *
  * @param {string} logId
  * @returns {Promise<Object|null>}
  */
@@ -132,7 +145,8 @@ async function getById(logId) {
        COALESCE(
          (SELECT json_agg(p.* ORDER BY p.created_at ASC)
           FROM photos p
-          WHERE p.log_id = dl.log_id),
+          WHERE p.log_id = dl.log_id
+             OR p.log_id = ANY(dl.merged_from_logs)),
          '[]'::json
        ) AS photos
      FROM daily_logs dl
@@ -188,6 +202,10 @@ async function getConflictingLogs(projectId, logDate, excludeLogId = null) {
  * arrived one) so the dashboard's "unresolved conflicts" view can find
  * the whole group with one query, not just the last-synced row.
  *
+ * Kept from Phase 3 for defensive/backward-compat use — Phase 5's normal
+ * flow no longer leaves logs sitting in 'conflict' (see
+ * applyConflictResolution below, which resolves immediately instead).
+ *
  * @param {Array<string>} logIds
  * @returns {Promise<void>}
  */
@@ -200,11 +218,72 @@ async function markConflicting(logIds) {
 }
 
 /**
- * Retrieves every unresolved conflict, grouped by (project_id, log_date).
- * Backs GET /api/v1/conflicts. Not part of the original spec's model list,
- * but needed since "unresolved conflicts" has to be computed from the
- * sync_status='conflict' rows rather than a dedicated conflicts table (the
- * Phase 3 schema doesn't define one) — see conflictResolver.js for why.
+ * Phase 5: updates the PRIMARY log of a conflict group in place with
+ * merged field values, marking it conflict_resolved and recording every
+ * log_id that was folded into it. Runs within the caller's transaction
+ * (client is required, not optional, since this is only ever called as
+ * part of syncController's atomic conflict-resolution flow — an
+ * unguarded standalone call here would be a correctness bug, not a
+ * convenience).
+ *
+ * merged_from_logs is set to the union of whatever was already recorded
+ * (for a primary that's already been merged into before) plus the newly
+ * involved log ids — not overwritten — so a log that joins its 3rd, 4th
+ * conflict over time keeps full lineage of every log ever folded in.
+ *
+ * @param {import('pg').PoolClient} client - REQUIRED, must be mid-transaction
+ * @param {string} primaryLogId
+ * @param {{weather: *, notes: *, supervisor_name: *, workers: Array, materials: Array, issues: Array}} resolvedData
+ * @param {Array<string>} newlyMergedLogIds - log_ids being folded in by this resolution (not including primaryLogId itself)
+ * @returns {Promise<Object>} the updated primary row
+ */
+async function applyConflictResolution(client, primaryLogId, resolvedData, newlyMergedLogIds) {
+  if (!client) {
+    throw new Error('DailyLog.applyConflictResolution requires a transaction client.');
+  }
+
+  const result = await client.query(
+    `UPDATE daily_logs SET
+       weather = $2::jsonb,
+       notes = $3,
+       supervisor_name = $4,
+       workers = $5::jsonb,
+       materials = $6::jsonb,
+       issues = $7::jsonb,
+       sync_status = 'conflict_resolved',
+       conflict_resolved = TRUE,
+       merged_from_logs = (
+         SELECT ARRAY(
+           SELECT DISTINCT unnest(merged_from_logs || $8::uuid[])
+         )
+       ),
+       updated_at = CURRENT_TIMESTAMP
+     WHERE log_id = $1
+     RETURNING *;`,
+    [
+      primaryLogId,
+      JSON.stringify(resolvedData.weather ?? {}),
+      resolvedData.notes ?? '',
+      resolvedData.supervisor_name,
+      JSON.stringify(resolvedData.workers ?? []),
+      JSON.stringify(resolvedData.materials ?? []),
+      JSON.stringify(resolvedData.issues ?? []),
+      newlyMergedLogIds,
+    ]
+  );
+
+  return result.rows[0];
+}
+
+/**
+ * Retrieves logs still sitting in sync_status='conflict', grouped by
+ * (project_id, log_date). Kept from Phase 3 for defensive/backward-compat
+ * use, but no longer the primary way to see conflicts under Phase 5 —
+ * normal resolution now happens synchronously during sync (see
+ * applyConflictResolution above), so nothing should typically be stuck
+ * here. GET /api/v1/conflicts now serves conflict HISTORY from the
+ * conflict_log audit table instead — see ConflictLog.getHistory() and
+ * conflictController.js.
  *
  * @param {string|null} [projectId] - optionally scope to one project
  * @returns {Promise<Array<{project_id: string, log_date: string, logs: Array<Object>}>>}
@@ -224,6 +303,7 @@ async function getUnresolvedConflicts(projectId = null) {
 
 module.exports = {
   upsert,
+  applyConflictResolution,
   getByProject,
   getById,
   exists,
