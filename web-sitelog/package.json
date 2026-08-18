@@ -11,12 +11,13 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8",
     "@tanstack/react-table": "^8.20.5",
     "axios": "^1.7.9",
     "jspdf": "^2.5.2",
-    "jspdf-autotable": "^5.0.8"
+    "jspdf-autotable": "^5.0.8",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-icons": "^5.7.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
