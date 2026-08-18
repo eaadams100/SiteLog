@@ -23,12 +23,13 @@
  * Merge strategy:
  *   - Scalar fields (weather, notes, supervisor_name): Last-Write-Wins,
  *     based on each log's updated_at.
- *   - workers: union keyed by `trade` — if the same trade appears in more
- *     than one log, the most-recently-updated log's entry for that trade
- *     wins (this can mean a worker COUNT gets overwritten, not summed —
- *     same reasoning as Phase 3: two "Mason: 4" entries are more likely
- *     the same crew logged twice than two different crews. Change the
- *     workerKey/merge call below if your usage pattern needs summing).
+ *   - workers: union keyed by `trade` — if the same trade appears in
+ *     more than one log, the most-recently-updated log's entry for that
+ *     trade wins (this can mean a worker COUNT gets overwritten, not
+ *     summed — same reasoning as Phase 3: two "Mason: 4" entries are
+ *     more likely the same crew logged twice than two different crews.
+ *     Change the workerKey/merge call below if your usage pattern needs
+ *     summing).
  *   - materials / issues: union with EXACT-duplicate removal — two
  *     materials are only treated as "the same" if name AND quantity AND
  *     unit all match (issues: description AND flagged). Unlike workers,

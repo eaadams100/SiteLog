@@ -157,6 +157,45 @@ async function getById(logId) {
 }
 
 /**
+ * Toggles the `flagged` field of a single issue within a log's `issues`
+ * JSONB array, identified by array index (issues don't have their own
+ * id — they're plain objects inside the array, so index is the only way
+ * to address one). Phase 6 addition, for the dashboard's flag button.
+ *
+ * Validates the index is in range before writing, rather than letting an
+ * out-of-range jsonb_set silently no-op — a 400 with a clear message is
+ * much easier to debug than "I clicked flag and nothing happened."
+ *
+ * @param {string} logId
+ * @param {number} issueIndex - 0-based index into the log's issues array
+ * @param {boolean} flagged
+ * @returns {Promise<Object|null>} the updated log (with photos, via getById), or null if logId not found
+ */
+async function updateIssueFlag(logId, issueIndex, flagged) {
+  const existing = await getById(logId);
+  if (!existing) return null;
+
+  const issues = Array.isArray(existing.issues) ? existing.issues : [];
+  if (issueIndex < 0 || issueIndex >= issues.length) {
+    const err = new Error(
+      `Issue index ${issueIndex} is out of range — this log has ${issues.length} issue(s).`
+    );
+    err.status = 400;
+    throw err;
+  }
+
+  await query(
+    `UPDATE daily_logs
+     SET issues = jsonb_set(issues, ARRAY[$2::text, 'flagged'], to_jsonb($3::boolean), true),
+         updated_at = CURRENT_TIMESTAMP
+     WHERE log_id = $1;`,
+    [logId, String(issueIndex), flagged]
+  );
+
+  return getById(logId);
+}
+
+/**
  * Checks whether any log already exists for a given project + date.
  *
  * @param {string} projectId
@@ -310,4 +349,5 @@ module.exports = {
   getConflictingLogs,
   markConflicting,
   getUnresolvedConflicts,
+  updateIssueFlag,
 };

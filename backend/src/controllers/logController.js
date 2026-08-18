@@ -59,4 +59,42 @@ async function getLogById(req, res, next) {
   }
 }
 
-module.exports = { getLogs, getLogById };
+/**
+ * PUT /api/v1/logs/:id/flag
+ *
+ * Body: { issueIndex: number, flagged: boolean }
+ *
+ * Toggles a single issue's flagged status. issueIndex addresses the
+ * issue by its position in the log's `issues` array — issues don't have
+ * their own id, so this is the only way to identify one. Phase 6
+ * addition, for the dashboard's flag button.
+ */
+async function flagIssue(req, res, next) {
+  try {
+    const { issueIndex, flagged } = req.body ?? {};
+
+    if (typeof issueIndex !== 'number' || !Number.isInteger(issueIndex)) {
+      return res.status(400).json({
+        success: false,
+        error: 'issueIndex is required and must be an integer.',
+      });
+    }
+    if (typeof flagged !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        error: 'flagged is required and must be a boolean.',
+      });
+    }
+
+    const log = await DailyLog.updateIssueFlag(req.params.id, issueIndex, flagged);
+    if (!log) {
+      return res.status(404).json({ success: false, error: 'Log not found.' });
+    }
+
+    res.json({ success: true, log });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { getLogs, getLogById, flagIssue };
