@@ -9,6 +9,9 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { getProjects, getLogs, getLogById, flagIssue } from './services/api';
+import { restoreSession } from './services/auth';
+import { useAuth } from './hooks/useAuth';
+import Login from './components/Login';
 import ProjectSelector from './components/ProjectSelector';
 import DateRangePicker from './components/DateRangePicker';
 import StatsCard from './components/StatsCard';
@@ -36,6 +39,20 @@ function computeStats(logs) {
 }
 
 export default function App() {
+  // Restore any persisted session once, before anything else renders.
+  useEffect(() => {
+    restoreSession();
+  }, []);
+
+  const { status: authStatus, user, logout } = useAuth();
+  // Phase 7: flagging is a project-manager action (matches the backend's
+  // `requireRole('pm')` on PUT /api/v1/logs/:id/flag) — a supervisor CAN
+  // log into the dashboard (nothing stops them) but sees a read-only
+  // view. Passed down to LogsTable/LogDetailModal, which disable the
+  // toggle rather than hide it entirely, so a supervisor can still see
+  // which issues are flagged.
+  const canFlag = user?.role === 'pm';
+
   const [projects, setProjects] = useState([]);
   const [projectsError, setProjectsError] = useState(null);
   const [selectedProjectId, setSelectedProjectId] = useState('');
@@ -51,7 +68,7 @@ export default function App() {
   const [modalLoading, setModalLoading] = useState(false);
   const [modalError, setModalError] = useState(null);
 
-  // --- Load projects once on mount ---
+  // --- Load projects once authenticated ---
   const loadProjects = useCallback(async () => {
     setProjectsError(null);
     try {
@@ -67,8 +84,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    loadProjects();
-  }, [loadProjects]);
+    if (authStatus === 'authenticated') loadProjects();
+  }, [authStatus, loadProjects]);
 
   // --- Load logs whenever project or date range changes ---
   const loadLogs = useCallback(async () => {
@@ -93,8 +110,8 @@ export default function App() {
   }, [selectedProjectId, dateRange]);
 
   useEffect(() => {
-    loadLogs();
-  }, [loadLogs]);
+    if (authStatus === 'authenticated') loadLogs();
+  }, [authStatus, loadLogs]);
 
   const stats = useMemo(() => computeStats(logs), [logs]);
 
@@ -149,6 +166,18 @@ export default function App() {
     if (selectedLogId) openDetails(selectedLogId);
   }, [selectedLogId, openDetails]);
 
+  if (authStatus === 'loading') {
+    return (
+      <div className="app-loading">
+        <LoadingSpinner label="Loading…" />
+      </div>
+    );
+  }
+
+  if (authStatus === 'unauthenticated') {
+    return <Login />;
+  }
+
   return (
     <div className="app">
       <header className="app__header">
@@ -157,6 +186,9 @@ export default function App() {
           <p>Construction site daily log monitoring &amp; reporting</p>
         </div>
         <div className="app__header-actions">
+          <span className="app__header-user">
+            {user?.name} <span className="app__header-role">({user?.role})</span>
+          </span>
           <button type="button" className="button button--secondary" onClick={loadLogs} disabled={logsLoading}>
             Refresh
           </button>
@@ -168,6 +200,9 @@ export default function App() {
             stats={stats}
             disabled={logsLoading}
           />
+          <button type="button" className="button button--secondary" onClick={logout}>
+            Log Out
+          </button>
         </div>
       </header>
 
@@ -199,13 +234,13 @@ export default function App() {
           {logsLoading && <LoadingSpinner label="Loading logs…" />}
           {logsError && !logsLoading && <ErrorDisplay message={logsError} onRetry={loadLogs} />}
           {!logsLoading && !logsError && (
-            <LogsTable logs={logs} onViewDetails={openDetails} onToggleFlag={handleToggleFlag} />
+            <LogsTable logs={logs} onViewDetails={openDetails} onToggleFlag={handleToggleFlag} canFlag={canFlag} />
           )}
         </section>
       </main>
 
       <footer className="app__footer">
-        <p>SiteLog Dashboard — v1.0 (Phase 6)</p>
+        <p>SiteLog Dashboard — v1.0 (Phase 7)</p>
       </footer>
 
       {selectedLogId && (
@@ -216,6 +251,7 @@ export default function App() {
           onClose={closeDetails}
           onToggleFlag={handleToggleFlag}
           onRetry={retryDetails}
+          canFlag={canFlag}
         />
       )}
     </div>

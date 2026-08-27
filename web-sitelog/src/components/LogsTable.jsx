@@ -60,7 +60,7 @@ function flaggedIssueCount(issues) {
   return issues.filter((i) => i.flagged).length;
 }
 
-export default function LogsTable({ logs, onViewDetails, onToggleFlag }) {
+export default function LogsTable({ logs, onViewDetails, onToggleFlag, canFlag = true }) {
   const [sorting, setSorting] = useState([{ id: 'log_date', desc: true }]);
   const [pagination, setPagination] = useState({ pageIndex: 0, pageSize: 10 });
 
@@ -126,6 +126,7 @@ export default function LogsTable({ logs, onViewDetails, onToggleFlag }) {
                   key={index}
                   issue={issue}
                   onToggle={(flagged) => onToggleFlag(log.log_id, index, flagged)}
+                  disabled={!canFlag}
                 />
               ))}
             </div>
@@ -147,7 +148,7 @@ export default function LogsTable({ logs, onViewDetails, onToggleFlag }) {
         enableSorting: false,
       },
     ],
-    [onViewDetails, onToggleFlag]
+    [onViewDetails, onToggleFlag, canFlag]
   );
 
   const table = useReactTable({

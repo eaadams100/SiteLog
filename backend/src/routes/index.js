@@ -8,6 +8,7 @@
 
 const express = require('express');
 
+const authRoutes = require('./authRoutes');
 const syncRoutes = require('./syncRoutes');
 const logRoutes = require('./logRoutes');
 const conflictRoutes = require('./conflictRoutes');
@@ -15,6 +16,7 @@ const projectRoutes = require('./projectRoutes');
 
 const router = express.Router();
 
+router.use('/auth', authRoutes);
 router.use('/sync', syncRoutes);
 router.use('/logs', logRoutes);
 router.use('/conflicts', conflictRoutes);

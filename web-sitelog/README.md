@@ -159,3 +159,49 @@ CORS_ORIGIN=http://localhost:5173,https://sitelog-dashboard.vercel.app
 - Toast/snackbar for flag-update feedback (currently a plain `window.alert` on failure)
 - Server-side pagination if a project ever exceeds ~200 logs in one filtered range
 - Auth (matches the rest of the project — still none)
+
+---
+
+# Phase 7 — Authentication
+
+Login required before the dashboard is usable. Every API call now
+carries the logged-in user's JWT automatically via an axios interceptor.
+
+## What's new
+
+- **`src/components/Login.jsx`** — combined login/register screen, mirrors the mobile app's `app/login.js`
+- **`src/services/auth.js`** — plain module with a small pub/sub (same pattern as mobile's `AuthService`), persists the JWT in `localStorage`
+- **`src/hooks/useAuth.js`** — bridges `services/auth.js` into React components
+- **`src/App.jsx`** — auth-gated: shows `<Login />` until authenticated; logout button + user name/role in the header
+- **`src/services/api.js`** — request interceptor attaches `Authorization: Bearer <token>` to every call; response interceptor logs out and reloads on any `401`
+
+## Role-based UI
+
+Flagging issues is a `pm`-only backend action (`requireRole('pm')` on
+`PUT /api/v1/logs/:id/flag`). The dashboard doesn't block a supervisor
+from logging in — they can still view everything read-only — but
+`canFlag` (`user.role === 'pm'`) is threaded through `LogsTable` and
+`LogDetailModal` to disable the flag toggle for non-PM accounts, matching
+what the backend would reject anyway.
+
+## localStorage vs httpOnly cookie — a real trade-off, not a default
+
+The JWT lives in `localStorage`, which is simpler than an httpOnly cookie
+(no backend cookie-setting changes needed) but readable by any JS running
+on the page — vulnerable to XSS in a way a cookie wouldn't be. Reasonable
+for an internal PM tool's MVP; worth reconsidering if this is ever
+exposed more broadly.
+
+## Testing
+
+Use the seeded test accounts (`npm run db:seed` on the backend):
+```
+pm@sitelog.test / manager123          (full access, including flagging)
+supervisor@sitelog.test / supervisor123   (read-only in this dashboard)
+```
+
+## What's next
+
+- Password reset / "forgot password" flow
+- Tighter XSS hardening if the localStorage token trade-off above becomes a concern
+- Admin UI for promoting a supervisor to pm (currently no way to change a role after registration)

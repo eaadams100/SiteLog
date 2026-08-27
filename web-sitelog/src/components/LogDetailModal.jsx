@@ -22,7 +22,7 @@ function formatDate(isoDate) {
   return date.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
 }
 
-export default function LogDetailModal({ log, loading, error, onClose, onToggleFlag, onRetry }) {
+export default function LogDetailModal({ log, loading, error, onClose, onToggleFlag, onRetry, canFlag = true }) {
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -82,6 +82,7 @@ export default function LogDetailModal({ log, loading, error, onClose, onToggleF
                     key={index}
                     issue={issue}
                     onToggle={(flagged) => onToggleFlag(log.log_id, index, flagged)}
+                    disabled={!canFlag}
                   />
                 ))}
               </section>

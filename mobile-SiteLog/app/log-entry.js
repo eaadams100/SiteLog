@@ -33,6 +33,7 @@ import { router } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import databaseManager from '../db/DatabaseManager';
 import syncService from '../services/SyncService';
+import { useAuth } from '../hooks/useAuth';
 import {
   generateUUID,
   getTodayISODate,
@@ -58,10 +59,17 @@ const PHOTO_SYNC_STYLES = {
 
 export default function LogEntryScreen() {
   const todayISO = getTodayISODate();
+  const { user } = useAuth();
+  // PHASE 7: supervisor_name is no longer a free-text field the person
+  // types — it's the authenticated user's name. The backend independently
+  // enforces this too (see backend/src/controllers/syncController.js),
+  // ignoring whatever supervisor_name a sync payload claims and using the
+  // JWT identity instead — this local value is just for display/local
+  // storage consistency, not the actual security boundary.
+  const supervisorName = user?.name ?? '';
 
   const [weatherCondition, setWeatherCondition] = useState('Sunny');
   const [weatherTemp, setWeatherTemp] = useState('');
-  const [supervisorName, setSupervisorName] = useState('');
   const [workers, setWorkers] = useState([{ trade: '', count: '' }]);
   const [materials, setMaterials] = useState([]);
   const [issues, setIssues] = useState([]);
@@ -127,7 +135,7 @@ export default function LogEntryScreen() {
    */
   const validate = () => {
     if (!supervisorName.trim()) {
-      Alert.alert('Missing information', 'Supervisor name is required.');
+      Alert.alert('Not logged in', 'Your session may have expired. Please log out and log back in.');
       return false;
     }
 
@@ -180,10 +188,7 @@ export default function LogEntryScreen() {
    */
   const validateForAutoSave = () => {
     if (!supervisorName.trim()) {
-      Alert.alert(
-        'Add supervisor name first',
-        'Enter the supervisor name before attaching photos, so this log can be saved.'
-      );
+      Alert.alert('Not logged in', 'Your session may have expired. Please log out and log back in.');
       return false;
     }
     const validWorkers = workers.filter(
@@ -421,16 +426,16 @@ export default function LogEntryScreen() {
             </View>
           </View>
 
-          {/* Supervisor */}
+          {/* Supervisor — read-only, derived from the logged-in account
+              (Phase 7). No longer an editable field: the backend ignores
+              whatever supervisor_name a sync payload claims and uses the
+              authenticated user's identity instead, so an editable field
+              here would just be misleading. */}
           <View style={styles.section}>
-            <Text style={styles.label}>Supervisor Name *</Text>
-            <TextInput
-              style={styles.input}
-              value={supervisorName}
-              onChangeText={setSupervisorName}
-              placeholder="e.g. John Mensah"
-              placeholderTextColor="#9CA3AF"
-            />
+            <Text style={styles.label}>Supervisor</Text>
+            <View style={styles.readOnlyField}>
+              <Text style={styles.readOnlyText}>{supervisorName}</Text>
+            </View>
           </View>
 
           {/* Weather */}
@@ -604,14 +609,14 @@ export default function LogEntryScreen() {
                 onPress={takePhoto}
                 disabled={photoLoading}
               >
-                <Text style={styles.photoActionButtonText}>Camera</Text>
+                <Text style={styles.photoActionButtonText}>📷 Take Photo</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.photoActionButton}
                 onPress={pickPhoto}
                 disabled={photoLoading}
               >
-                <Text style={styles.photoActionButtonText}>Pick from Gallery</Text>
+                <Text style={styles.photoActionButtonText}>🖼 Pick from Gallery</Text>
               </TouchableOpacity>
             </View>
 

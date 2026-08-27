@@ -1,22 +1,15 @@
 {
   "expo": {
-    "name": "SiteLog",
-    "slug": "sitelog",
+    "name": "mobile-SiteLog",
+    "slug": "mobile-SiteLog",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
+    "scheme": "mobilesitelog",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
-    "scheme": "sitelog",
-    "splash": {
-      "backgroundColor": "#1D4ED8"
-    },
-    "assetBundlePatterns": [
-      "**/*"
-    ],
     "ios": {
-      "supportsTablet": true,
-      "bundleIdentifier": "com.sitelog.app"
+      "supportsTablet": true
     },
     "android": {
       "adaptiveIcon": {
@@ -27,7 +20,7 @@
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-      "package": "com.sitelog.app"
+      "package": "com.anonymous.mobileSiteLog"
     },
     "web": {
       "output": "static",
@@ -48,13 +41,7 @@
         }
       ],
       "expo-sqlite",
-      [
-        "expo-image-picker",
-        {
-          "cameraPermission": "SiteLog uses your camera to capture photos of site conditions for daily logs.",
-          "photosPermission": "SiteLog uses your photo library so you can attach existing photos to daily logs."
-        }
-      ]
+      "expo-secure-store"
     ],
     "experiments": {
       "typedRoutes": true,

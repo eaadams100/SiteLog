@@ -5,7 +5,7 @@
  *
  * Phase 4 adds the sync status bar (SyncButton, which is self-contained
  * and handles its own state) above the list, and emoji on each log
- * card's sync badge.
+ * card's sync badge. Phase 7 adds a logout button to the header.
  */
 
 import React, { useState, useCallback } from 'react';
@@ -17,19 +17,38 @@ import {
   StyleSheet,
   RefreshControl,
   ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
-import { router } from 'expo-router';
+import { router, Stack } from 'expo-router';
 import databaseManager from '../db/DatabaseManager';
 import { formatDate } from '../utils/helpers';
 import SyncButton from '../components/SyncButton';
+import { useAuth } from '../hooks/useAuth';
 
 const SYNC_STATUS_STYLES = {
-  pending: { backgroundColor: '#FEF3C7', color: '#92400E', label: 'Pending' },
-  synced: { backgroundColor: '#D1FAE5', color: '#065F46', label: 'Synced' },
-  failed: { backgroundColor: '#FEE2E2', color: '#991B1B', label: 'Failed' },
+  pending: { backgroundColor: '#FEF3C7', color: '#92400E', label: 'Pending ⏳' },
+  synced: { backgroundColor: '#D1FAE5', color: '#065F46', label: 'Synced ✅' },
+  failed: { backgroundColor: '#FEE2E2', color: '#991B1B', label: 'Failed ❌' },
 };
+
+function LogoutButton() {
+  const { user, logout } = useAuth();
+
+  const handlePress = () => {
+    Alert.alert('Log out?', user?.name ? `Signed in as ${user.name}` : undefined, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Log Out', style: 'destructive', onPress: () => logout() },
+    ]);
+  };
+
+  return (
+    <TouchableOpacity onPress={handlePress} style={styles.logoutButton} hitSlop={10}>
+      <Text style={styles.logoutButtonText}>Log Out</Text>
+    </TouchableOpacity>
+  );
+}
 
 function SyncBadge({ status }) {
   const style = SYNC_STATUS_STYLES[status] ?? SYNC_STATUS_STYLES.pending;
@@ -133,6 +152,7 @@ export default function LogsListScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['bottom']}>
+      <Stack.Screen options={{ headerRight: () => <LogoutButton /> }} />
       <SyncButton />
       <FlatList
         data={logs}
@@ -172,6 +192,8 @@ export default function LogsListScreen() {
 
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: '#F3F4F6' },
+  logoutButton: { paddingHorizontal: 8, paddingVertical: 4 },
+  logoutButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: '600' },
   centeredContainer: {
     flex: 1,
     justifyContent: 'center',

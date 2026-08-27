@@ -14,9 +14,16 @@
  * backend PDF endpoint, and building one wasn't asked for or needed. See
  * components/ExportPDF.jsx, which builds the PDF directly from props
  * rather than calling this file.
+ *
+ * Phase 7: every request now carries an Authorization header (via a
+ * request interceptor, so every method below gets it automatically
+ * without repeating the header object everywhere), and a response
+ * interceptor logs the person out and reloads on any 401 — this catches
+ * both "never logged in" and "token expired mid-session" the same way.
  */
 
 import axios from 'axios';
+import { getToken, logout } from './auth';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://sitelog-api.onrender.com';
 
@@ -25,6 +32,30 @@ const client = axios.create({
   timeout: 60000, // generous — the Render free tier can take 30-50s to wake from a cold start
   headers: { 'Content-Type': 'application/json' },
 });
+
+client.interceptors.request.use((config) => {
+  const token = getToken();
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+client.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      // Token missing/invalid/expired — clear the stale session and let
+      // App.jsx's auth gate show the login screen again. A hard reload
+      // (rather than just calling logout()) also clears any in-flight
+      // component state that assumed a valid session, avoiding a
+      // confusing half-logged-out UI.
+      logout();
+      window.location.reload();
+    }
+    return Promise.reject(error);
+  }
+);
 
 /**
  * Normalizes any axios error into a plain Error with a human-readable

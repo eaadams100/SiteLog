@@ -445,3 +445,56 @@ attributing specific numbers/notes to their own report matters for your
 usage, that's a good next addition — flagging it as a real product
 question, not just a technical one: should someone be told when their
 submitted numbers got merged with someone else's?
+
+---
+
+# Phase 7 — Authentication
+
+Login required before the app is usable. Every sync request now carries
+the logged-in user's JWT, and `supervisor_name` is no longer something
+you type — it's derived from your account.
+
+## What's new
+
+- **`app/login.js`** — combined login/register screen (toggle between modes, no separate register route)
+- **`services/AuthService.js`** — singleton auth module (same pattern as `SyncService`/`DatabaseManager`), persists the JWT via `expo-secure-store` (encrypted Keychain/Keystore storage — deliberately not `AsyncStorage`, which is plaintext)
+- **`hooks/useAuth.js`** — bridges `AuthService`'s state into React components
+- **`app/_layout.js`** — now gates all routes: unauthenticated → only `/login` reachable; authenticated → bounced away from `/login` automatically
+- **`app/index.js`** — logout button in the header
+- **`app/log-entry.js`** — the "Supervisor Name" field is now **read-only**, showing your logged-in account's name, not an editable text box
+- **`services/SyncService.js`** — attaches `Authorization: Bearer <token>` to every sync/log-fetch request
+
+## Why the Supervisor Name field became read-only
+
+Before this phase, anyone could type any name into that field — nothing
+tied it to a real identity. Now the backend independently derives
+`supervisor_name` from your JWT and **ignores** whatever the app sends in
+the payload (verified with a real test — see `backend/README.md`'s Phase
+7 section), so an editable field here would just be misleading about
+what actually controls the stored value.
+
+## Installation
+
+```bash
+cd mobile
+npx expo install expo-secure-store
+```
+
+Same reasoning as `netinfo` back in Phase 4: `package.json` has a
+reasonable version guess, but `expo install` resolves the one actually
+matched to your SDK (54).
+
+## Testing
+
+Use the seeded test accounts (see `backend/README.md`'s Phase 7 section,
+`npm run db:seed`) to log in immediately without registering:
+```
+supervisor@sitelog.test / supervisor123
+pm@sitelog.test / manager123
+```
+
+## What's next
+
+- No password reset / "forgot password" flow
+- No way to change your own password or email from within the app
+- Session never proactively refreshes — a 30-day token just eventually stops working, requiring a fresh login (no silent refresh)

@@ -49,9 +49,20 @@ async function recordSyncError(logId, message) {
  *   5. insert its photos
  *   6. COMMIT (or ROLLBACK on any failure, caught by the outer per-log
  *      try/catch in syncData, which records sync_errors and moves on)
+ *
+ * PHASE 7: supervisor_id and supervisor_name are taken from the
+ * authenticated user (req.user, passed in as `authenticatedUser`) —
+ * NOT from whatever the client included in the payload. Before auth
+ * existed, supervisor_name was free text the mobile app just sent as-is;
+ * trusting it now would let any authenticated device attribute a log to
+ * a different supervisor by simply typing a different name. The mobile
+ * app no longer even shows an editable field for this — see
+ * mobile/app/log-entry.js.
  */
-async function processLog(incoming) {
+async function processLog(incoming, authenticatedUser) {
   const logId = incoming.id;
+  const supervisorId = authenticatedUser.id;
+  const supervisorName = authenticatedUser.name;
 
   // Plain read, not part of the transaction — see file header for why a
   // pessimistic lock here wasn't deemed necessary for this app's traffic
@@ -72,7 +83,7 @@ async function processLog(incoming) {
 
     if (conflictingLogs.length > 0) {
       const resolution = resolveConflict(
-        { ...incoming, log_id: logId },
+        { ...incoming, log_id: logId, supervisor_name: supervisorName },
         conflictingLogs
       );
 
@@ -88,14 +99,14 @@ async function processLog(incoming) {
         {
           id: logId,
           project_id: incoming.project_id,
-          supervisor_id: incoming.supervisor_id || null,
+          supervisor_id: supervisorId,
           log_date: incoming.log_date,
           weather: incoming.weather || {},
           workers: incoming.workers || [],
           materials: incoming.materials || [],
           issues: incoming.issues || [],
           notes: incoming.notes || '',
-          supervisor_name: incoming.supervisor_name,
+          supervisor_name: supervisorName,
           sync_status: syncStatus,
           created_at: incoming.created_at,
           updated_at: incoming.updated_at,
@@ -134,14 +145,14 @@ async function processLog(incoming) {
         {
           id: logId,
           project_id: incoming.project_id,
-          supervisor_id: incoming.supervisor_id || null,
+          supervisor_id: supervisorId,
           log_date: incoming.log_date,
           weather: incoming.weather || {},
           workers: incoming.workers || [],
           materials: incoming.materials || [],
           issues: incoming.issues || [],
           notes: incoming.notes || '',
-          supervisor_name: incoming.supervisor_name,
+          supervisor_name: supervisorName,
           sync_status: 'synced',
           created_at: incoming.created_at,
           updated_at: incoming.updated_at,
@@ -180,7 +191,8 @@ async function processLog(incoming) {
 }
 
 /**
- * POST /api/v1/sync
+ * POST /api/v1/sync — requires authenticate middleware to have run first
+ * (see routes/syncRoutes.js), so req.user is always populated here.
  */
 async function syncData(req, res, next) {
   try {
@@ -191,7 +203,7 @@ async function syncData(req, res, next) {
 
     for (const incoming of logs) {
       try {
-        const { syncStatus, conflictInfo, photosSynced } = await processLog(incoming);
+        const { syncStatus, conflictInfo, photosSynced } = await processLog(incoming, req.user);
 
         summary.processed += 1;
         if (conflictInfo) summary.conflicts += 1;

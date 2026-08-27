@@ -48,6 +48,7 @@
  */
 
 import databaseManager from '../db/DatabaseManager';
+import authService from './AuthService';
 import {
   API_BASE_URL,
   API_ENDPOINTS,
@@ -300,9 +301,13 @@ class SyncService {
     const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
 
     try {
+      const token = await authService.getToken();
       const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.sync}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify(payload),
         signal: controller.signal,
       });
@@ -339,7 +344,9 @@ class SyncService {
     const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
 
     try {
+      const token = await authService.getToken();
       const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.logs}/${logId}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
         signal: controller.signal,
       });
       if (!response.ok) return null;

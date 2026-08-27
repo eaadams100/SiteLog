@@ -54,7 +54,7 @@ cp .env.example .env
 # edit .env: paste your Neon connection string into DATABASE_URL
 
 npm run db:migrate   # applies src/db/schema.sql to your database
-npm run dev
+npm run dev           # starts the server with auto-restart on file changes
 ```
 
 Health check: `GET http://localhost:3000/health` — pings the database and
@@ -120,10 +120,19 @@ recorded in `sync_errors` and counted under `summary.errors`.
 ### `GET /api/v1/logs/:id`
 Returns a single log with its photos nested under `photos`.
 
+### `PUT /api/v1/logs/:id/flag` (Phase 6)
+Toggles a single issue's `flagged` status. Body: `{ "issueIndex": number, "flagged": boolean }`.
+`issueIndex` addresses the issue by its position in the log's `issues`
+array (issues don't have their own id). Returns `400` if `issueIndex` is
+out of range for that log, `404` if the log doesn't exist, or
+`{ success: true, log }` with the updated log on success.
+
 ### `GET /api/v1/conflicts?projectId=...`
-Returns unresolved conflicts grouped by `(project_id, log_date)`, each
-with all the conflicting log rows attached under `logs`. `projectId` is
-optional — omit it to see conflicts across every project.
+Returns conflict **history** — every automatic merge that's happened, via
+the `conflict_log` audit table — not a review queue. Since Phase 5,
+conflicts resolve automatically during sync, so nothing normally sits
+"unresolved" waiting for a person. `projectId` is optional — omit it to
+see history across every project.
 
 ### `GET /api/v1/projects` · `POST /api/v1/projects` · `GET /api/v1/projects/:id`
 Standard CRUD-lite for projects. `POST` requires `name`; `location` is optional.
@@ -383,3 +392,106 @@ duplicates, array union keeping unique items.
   manual resolution (future)" — still future)
 - Cloud photo storage (unchanged from Phase 3 — still metadata-only sync)
 - Auth
+
+---
+
+# Phase 7 — Authentication
+
+Roll-your-own JWT + bcrypt auth, covering both mobile (supervisors) and
+the dashboard (project managers). Every API endpoint except `/health`,
+`POST /api/v1/auth/register`, and `POST /api/v1/auth/login` now requires
+a valid `Authorization: Bearer <token>` header.
+
+## New endpoints
+
+- **`POST /api/v1/auth/register`** — `{ email, password, name, role? }` → `{ success, token, user }`. `role` defaults to `'supervisor'` if omitted; must be `'supervisor'` or `'pm'` if provided.
+- **`POST /api/v1/auth/login`** — `{ email, password }` → `{ success, token, user }`, or 401 on bad credentials (same generic error for "no such email" and "wrong password" — doesn't let a caller enumerate registered emails).
+- **`GET /api/v1/auth/me`** — requires auth, returns the current user's profile.
+
+## Role gating
+
+| Route | Requires |
+|---|---|
+| `POST /api/v1/sync` | any authenticated user |
+| `GET /api/v1/logs`, `GET /api/v1/logs/:id` | any authenticated user |
+| `PUT /api/v1/logs/:id/flag` | `pm` |
+| `GET /api/v1/conflicts` | `pm` |
+| `GET /api/v1/projects`, `GET /api/v1/projects/:id` | any authenticated user |
+| `POST /api/v1/projects` | `pm` |
+
+## ⚠️ Security gap, deliberately left open — read before real deployment
+
+**Registration is open, and the caller picks their own role.** Anyone who
+can reach `POST /api/v1/auth/register` can grant themselves `'pm'`
+privileges — flagging issues, viewing conflict history, creating
+projects — just by choosing that role at signup. This is fine for
+initial setup and a trusted internal rollout, but it's a real gap before
+wider use. Two reasonable fixes, not implemented here since they're a
+product decision:
+1. Strip `role` from the public registration payload; everyone registers
+   as `'supervisor'`, and promoting someone to `'pm'` becomes a separate
+   admin-only action (needs an admin/superuser concept that doesn't
+   exist yet).
+2. Invite-code or admin-approval-gated registration.
+
+## Identity, not free text
+
+Before this phase, `supervisor_name` was whatever string the mobile
+client happened to send — no verification, no way to know if it was
+accurate. Now, `syncController.js` **ignores** `supervisor_name` in the
+sync payload entirely and derives both `supervisor_id` and
+`supervisor_name` from the authenticated JWT (`req.user`). Verified with
+a real test: a supervisor's device tried to sync a log claiming
+`"supervisor_name": "SOMEONE ELSE ENTIRELY"` — the stored row correctly
+shows the authenticated user's real name, not the claimed one.
+
+## Token lifetime
+
+Tokens default to 30 days (`JWT_EXPIRES_IN` in `.env`), not the more
+typical 15min-1hr for a web app. Deliberate: mobile supervisors are
+offline-first and may not reconnect for days — a short-lived token would
+force a re-login right when someone finally has signal and wants to sync.
+There's no refresh-token flow or revocation list; a role change or
+account issue won't take effect until the current token naturally
+expires. Worth revisiting if that trade-off doesn't fit your needs.
+
+## Password hashing
+
+`bcryptjs` (pure JS), not `bcrypt` (native bindings) — avoids native
+-module compile risk on Render, the same reasoning already applied
+elsewhere in this project.
+
+## Setup
+
+```bash
+cd backend
+npm install
+node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"  # generate JWT_SECRET
+# add JWT_SECRET (and optionally JWT_EXPIRES_IN) to .env
+npm run db:migrate   # adds the users table + supervisor_id FK, idempotent
+npm run db:seed      # also now seeds two test accounts — see below
+```
+
+`npm run db:seed` now prints test login credentials:
+```
+supervisor supervisor@sitelog.test  /  supervisor123
+pm         pm@sitelog.test          /  manager123
+```
+**Change or remove these before any real deployment** — they're
+published in this repo/README, so they're not a secret.
+
+## Verified
+
+Full auth flow tested against real Postgres: unauthenticated request
+correctly 401s, login/register work, wrong password correctly 401s,
+`GET /auth/me` returns the right profile, a supervisor attempting a
+`pm`-only action correctly 403s, a `pm` succeeds at the same action, and
+the identity-spoofing prevention in `syncController.js` was confirmed
+with a live request.
+
+## What's next
+
+- Fix the open-registration role-selection gap above, before real deployment
+- Refresh tokens / revocation list
+- Password reset flow (currently none — a forgotten password has no self-service recovery)
+- Rate limiting specifically on `/auth/login` (currently just the app-wide rate limiter, not a tighter brute-force-specific one)
