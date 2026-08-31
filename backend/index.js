@@ -20,6 +20,17 @@ const { pool } = require('./src/config/db');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Render (like Heroku, most PaaS) sits behind a reverse proxy, which adds
+// an X-Forwarded-For header to every request. Without telling Express to
+// trust that proxy hop, express-rate-limit refuses to use it to identify
+// clients — correctly, since blindly trusting X-Forwarded-For without
+// knowing it came from a real proxy would let anyone spoof their IP to
+// dodge rate limits — and throws ERR_ERL_UNEXPECTED_X_FORWARDED_FOR on
+// every request under the limiter instead. `1` means "trust exactly one
+// hop" (Render's own edge), which is correct for this deployment;
+// bumping it higher would only be needed behind multiple chained proxies.
+app.set('trust proxy', 1);
+
 // --- Core middleware ---
 app.use(helmet());
 
