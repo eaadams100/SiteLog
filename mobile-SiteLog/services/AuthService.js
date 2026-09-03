@@ -101,43 +101,61 @@ class AuthService {
   }
 
   async _authenticate(endpoint, body) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
 
-    try {
-      const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+  try {
+    const url = `${API_BASE_URL}${endpoint}`;
 
-      const data = await response.json().catch(() => null);
+    console.log('AUTH REQUEST URL:', url);
 
-      if (!response.ok) {
-        const message = data?.error || `Request failed with status ${response.status}.`;
-        this._emit({ error: message });
-        return { success: false, error: message };
-      }
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
 
-      await Promise.all([
-        SecureStore.setItemAsync(TOKEN_KEY, data.token),
-        SecureStore.setItemAsync(USER_KEY, JSON.stringify(data.user)),
-      ]);
+    const data = await response.json().catch(() => null);
 
-      this._emit({ status: 'authenticated', token: data.token, user: data.user, error: null });
-      return { success: true };
-    } catch (err) {
+    if (!response.ok) {
       const message =
-        err.name === 'AbortError'
-          ? 'The server took too long to respond. It may be waking up from sleep — try again in a moment.'
-          : err.message || 'Could not reach the server.';
+        data?.error || `Request failed with status ${response.status}.`;
+
       this._emit({ error: message });
       return { success: false, error: message };
-    } finally {
-      clearTimeout(timeoutId);
     }
+
+    await Promise.all([
+  SecureStore.setItemAsync(TOKEN_KEY, data.token),
+  SecureStore.setItemAsync(USER_KEY, JSON.stringify(data.user)),
+]);
+
+    this._emit({
+      status: 'authenticated',
+      token: data.token,
+      user: data.user,
+      error: null,
+    });
+
+    return { success: true };
+  } catch (err) {
+    console.log('LOGIN ERROR:', err);
+    console.log('API URL:', `${API_BASE_URL}${endpoint}`);
+
+    const message =
+      err.name === 'AbortError'
+        ? 'The server took too long to respond.'
+        : err.message || 'Could not reach the server.';
+
+    this._emit({ error: message });
+    return { success: false, error: message };
+  } finally {
+    clearTimeout(timeoutId);
   }
+}
 
   /**
    * Clears the stored session. Does NOT delete any local log/photo data —

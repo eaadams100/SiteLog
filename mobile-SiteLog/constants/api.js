@@ -12,6 +12,10 @@
 export const API_BASE_URL = 'https://sitelog-api.onrender.com';
 
 export const API_ENDPOINTS = {
+  authLogin: '/api/v1/auth/login',
+  authRegister: '/api/v1/auth/register',
+  authMe: '/api/v1/auth/me',
+
   sync: '/api/v1/sync',
   projects: '/api/v1/projects',
   logs: '/api/v1/logs',
